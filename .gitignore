@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data/
+*.session
+*.session-journal
+.env
+.DS_Store
