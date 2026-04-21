@@ -1,1 +1,1 @@
-worker: python3 auto3.3.py
+worker: python ai3+5自动预测.py
