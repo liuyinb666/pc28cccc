@@ -1,0 +1,12 @@
+cat > .gitignore << 'EOF'
+__pycache__/
+*.py[cod]
+data/
+*.session
+*.session-journal
+*.session.lock
+*.log
+.env
+.railway/
+.DS_Store
+EOF
