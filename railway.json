@@ -4,7 +4,7 @@
     "buildCommand": "pip install -r requirements.txt"
   },
   "deploy": {
-    "startCommand": "python ai3+5自动预测.py",
+    "startCommand": "python auto_3.3.py",
     "restartPolicyType": "ON_FAILURE",
     "healthcheckPath": "/health"
   }
