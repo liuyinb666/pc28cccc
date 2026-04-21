@@ -32,7 +32,7 @@ from telethon.errors import SessionPasswordNeededError, FloodWaitError
 # ==================== 配置 ====================
 class Config:
     BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
-    API_ID = int(os.environ.get('API_ID', 0))
+    API_ID = int(os.environ.get('API_ID', ))
     API_HASH = os.environ.get('API_HASH', '')
     PC28_API_BASE = "https://www.pc28.help/api/kj.json?nbr=200"
     ADMIN_USER_IDS = [7673012566]
@@ -1586,20 +1586,20 @@ class AccountManager:
                     logger.log_system(f"账户 {phone} 连接失效，已标记为未登录")
 
     async def reset_auto_flags_on_start(self):
-        for phone, acc in self.accounts.items():
-            if acc.auto_betting or acc.prediction_broadcast:
-                logger.log_system(f"启动重置账户 {phone} 的自动状态: auto_betting={acc.auto_betting}, broadcast={acc.prediction_broadcast}")
-                await self.update_account(phone, auto_betting=False, prediction_broadcast=False)
-        logger.log_system("已重置所有账户的自动投注和播报标志，请手动开启所需功能")
+    # 修复：不再强制重置自动投注标志，保持用户设置
+    auto_count = sum(1 for acc in self.accounts.values() if acc.auto_betting)
+    broadcast_count = sum(1 for acc in self.accounts.values() if acc.prediction_broadcast)
+    logger.log_system(f"启动时账户状态: 自动投注={auto_count}, 播报={broadcast_count} (保持原有设置)")
+    # 不执行任何重置操作
 
-    async def start_periodic_save(self):
-        self._save_task = asyncio.create_task(self._periodic_save())
+async def start_periodic_save(self):
+    self._save_task = asyncio.create_task(self._periodic_save())
 
-    async def stop_periodic_save(self):
-        if self._save_task:
-            self._save_task.cancel()
-            try: await self._save_task
-            except asyncio.CancelledError: pass
+async def stop_periodic_save(self):
+    if self._save_task:
+        self._save_task.cancel()
+        try: await self._save_task
+        except asyncio.CancelledError: pass
 
 # ==================== 金额管理器 ====================
 class AmountManager:
