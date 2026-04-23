@@ -1234,7 +1234,7 @@ class PC28API:
 
     async def initialize_history(self, count=Config.INITIAL_HISTORY_SIZE, max_retries=3):
         logger.log_system("正在初始化历史数据...")
-        kj_csv_url = f"https://www.pc28.ai/api/history/kj.csv?nbr={Config.KJ_HISTORY_DOWNLOAD}"
+        kj_csv_url = f"https://www.pc28.help/api/kj.json?nbr={Config.KJ_HISTORY_DOWNLOAD}"
         kj_rows = await self.download_csv_data(kj_csv_url)
         if kj_rows:
             self.history_cache.clear()
