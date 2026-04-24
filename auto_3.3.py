@@ -1611,7 +1611,7 @@ class PC28API:
     async def initialize_history(self, count=Config.INITIAL_HISTORY_SIZE, max_retries=3):
         logger.log_system("正在初始化历史数据（优先使用CSV批量下载）...")
 
-        keno_csv_url = f"https://www.pc28.ai/api/history/keno.csv?nbr={Config.KENO_HISTORY_DOWNLOAD}"
+        keno_csv_url = f"https://pc28.help/api/keno.json?nbr={Config.KENO_HISTORY_DOWNLOAD}"
         keno_rows = await self.download_csv_data(keno_csv_url)
         if keno_rows:
             self.keno_cache.clear()
@@ -1622,7 +1622,7 @@ class PC28API:
             self.save_cache()
             logger.log_system(f"从CSV加载Keno数据 {len(self.keno_cache)} 条")
 
-        kj_csv_url = f"https://www.pc28.ai/api/history/kj.csv?nbr={Config.KJ_HISTORY_DOWNLOAD}"
+        kj_csv_url = f"https://pc28.help/api/keno.json?nbr={Config.KJ_HISTORY_DOWNLOAD}"
         kj_rows = await self.download_csv_data(kj_csv_url)
         if kj_rows:
             self.history_cache.clear()
@@ -2997,14 +2997,14 @@ class GlobalScheduler:
     async def _download_history_during_maintenance(self):
         try:
             logger.log_system("维护时段：开始下载历史数据...")
-            kj_url = f"https://www.pc28.ai/api/history/kj.csv?nbr={Config.KJ_HISTORY_DOWNLOAD}"
+            kj_url = f"https://pc28.help/history/kj.csv?nbr={Config.KJ_HISTORY_DOWNLOAD}"
             kj_rows = await self.api.download_csv_data(kj_url)
             kj_data = []
             for row in kj_rows:
                 parsed = self.api._parse_kj_csv_row(row)
                 if parsed:
                     kj_data.append(parsed)
-            keno_url = f"https://www.pc28.ai/api/history/keno.csv?nbr={Config.KENO_HISTORY_DOWNLOAD}"
+            keno_url = f"https://pc28.help/api/keno.json?nbr={Config.KENO_HISTORY_DOWNLOAD}"
             keno_rows = await self.api.download_csv_data(keno_url)
             keno_data = []
             for row in keno_rows:
@@ -3265,7 +3265,7 @@ class PC28Bot:
         await update.message.reply_text("🔄 开始离线训练，这可能需要几分钟...")
 
         try:
-            kj_url = f"https://www.pc28.ai/api/history/kj.csv?nbr={Config.KJ_HISTORY_DOWNLOAD}"
+            kj_url = f"https://pc28.help/history/kj.csv?nbr={Config.KJ_HISTORY_DOWNLOAD}"
             kj_rows = await self.api.download_csv_data(kj_url)
             kj_data = []
             for row in kj_rows:
@@ -3273,7 +3273,7 @@ class PC28Bot:
                 if parsed:
                     kj_data.append(parsed)
 
-            keno_url = f"https://www.pc28.ai/api/history/keno.csv?nbr={Config.KENO_HISTORY_DOWNLOAD}"
+            keno_url = f"https://pc28.help/history/keno.csv?nbr={Config.KENO_HISTORY_DOWNLOAD}"
             keno_rows = await self.api.download_csv_data(keno_url)
             keno_data = []
             for row in keno_rows:
