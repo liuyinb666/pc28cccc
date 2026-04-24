@@ -36,10 +36,11 @@ from telethon.errors import SessionPasswordNeededError, FloodWaitError, PhoneCod
 # ==================== 配置 ====================
 class Config:
     BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
-    API_ID = int(os.environ.get('API_ID', ))
+    API_ID = int(os.environ.get('API_ID', 0))
     API_HASH = os.environ.get('API_HASH', '')
 
-    PC28_API_BASE = "https://www.pc28.help/api/kj.json?nbr=500"
+    # API地址更新
+    PC28_API_BASE = "https://pc28.help/api/kj.json?nbr=500"  # 更新
     ADMIN_USER_IDS = [5338954122]
 
     DATA_DIR = Path("data")
@@ -110,14 +111,13 @@ class Config:
     # 播报历史记录条数
     PREDICTION_HISTORY_SIZE = 20
 
-    # 风险系数（用于一键推荐模式）
+    # 风险系数
     RISK_PROFILES = {
-        '保守': 0.005,   # 0.5%
-        '稳定': 0.01,    # 1%
-        '激进': 0.02,    # 2%
+        '保守': 0.005,
+        '稳定': 0.01,
+        '激进': 0.02,
     }
 
-    # 一键推荐金额参数（保留，但不再直接使用）
     RECOMMEND_BASE_RISK = 0.01
     RECOMMEND_RISK_RANGE = 0.02
 
@@ -382,7 +382,6 @@ class Algorithms:
 
     @staticmethod
     def theoretical(history, latest) -> Dict[str, float]:
-        """理论概率（固定值）"""
         return BASE_PROB.copy()
 
 # ==================== 模式识别类 ====================
@@ -753,10 +752,9 @@ class TrainingState:
         self.training_start_time = datetime.now().isoformat()
         self.save()
 
-# ==================== 模型管理器（稳定融合版） ====================
+# ==================== 模型管理器 ====================
 class ModelManager:
     def __init__(self):
-        # 所有权重初始为2.5，理论概率略高作为锚点
         self.weights = {
             "概率分布": 2.5,
             "趋势分析": 2.5,
@@ -772,7 +770,7 @@ class ModelManager:
             "小时规律": 2.5,
             "位置规律": 2.5,
             "趋势强化": 2.5,
-            "理论概率": 3.0,      # 锚点算法
+            "理论概率": 3.0,
         }
         self.exploration_rate = Config.EXPLORATION_RATE
         self.prediction_history = []
@@ -835,7 +833,6 @@ class ModelManager:
                 logger.log_error(0, "保存模型权重失败", e)
 
     def reset_weights(self):
-        """重置所有权重为初始值，清空所有历史"""
         self.weights = {
             "概率分布": 2.5,
             "趋势分析": 2.5,
@@ -916,7 +913,6 @@ class ModelManager:
         return scores
 
     def predict(self, history, latest):
-        """统一预测：主推、候选、杀组均来自同一套分数"""
         algo_scores_list = []
         for name, func in self.algos:
             try:
@@ -1067,7 +1063,6 @@ class ModelManager:
         confidence = 50 + min(40, (len(history) / 50) * 40)
         return min_combo, min(90, int(confidence))
 
-    # ==================== 离线训练（使用验证集和早停） ====================
     async def offline_train(self, kj_data, keno_data, max_epochs=Config.TRAIN_EPOCHS):
         if self.is_training:
             logger.log_system("训练已在运行中")
@@ -1277,13 +1272,13 @@ class ModelManager:
         return correct / total if total > 0 else 0
 
     async def _check_new_result(self):
-        # 实际由GlobalScheduler覆盖
         return False
 
 # ==================== API模块 ====================
 class PC28API:
     def __init__(self):
-        self.base_url = Config.PC28_API_BASE
+        # API地址更新
+        self.base_url = "https://pc28.help/api"  # 更新
         self.session = None
         self.call_stats = {
             'total_calls': 0, 'successful_calls': 0, 'failed_calls': 0,
@@ -1331,7 +1326,14 @@ class PC28API:
             self.call_stats['total_calls'] += 1
             start = time.time()
             try:
-                url = f"{self.base_url}/{endpoint}.json"
+                # 构建完整URL
+                if endpoint == 'kj':
+                    url = f"{self.base_url}/kj.json"
+                elif endpoint == 'keno':
+                    url = f"{self.base_url}/keno.json"
+                else:
+                    url = f"{self.base_url}/{endpoint}.json"
+
                 if params:
                     query_string = "&".join(f"{k}={v}" for k, v in params.items())
                     url = f"{url}?{query_string}"
@@ -1611,7 +1613,8 @@ class PC28API:
     async def initialize_history(self, count=Config.INITIAL_HISTORY_SIZE, max_retries=3):
         logger.log_system("正在初始化历史数据（优先使用CSV批量下载）...")
 
-        keno_csv_url = f"https://pc28.help/api/keno.json?nbr=500{Config.KENO_HISTORY_DOWNLOAD}"
+        # CSV地址更新
+        keno_csv_url = f"https://pc28.help/api/history/keno.csv?nbr=1000{Config.KENO_HISTORY_DOWNLOAD}"  # 更新
         keno_rows = await self.download_csv_data(keno_csv_url)
         if keno_rows:
             self.keno_cache.clear()
@@ -1622,7 +1625,7 @@ class PC28API:
             self.save_cache()
             logger.log_system(f"从CSV加载Keno数据 {len(self.keno_cache)} 条")
 
-        kj_csv_url = f"https://pc28.help/api/keno.json?nbr=500{Config.KJ_HISTORY_DOWNLOAD}"
+        kj_csv_url = f"https://pc28.help/api/history/kj.csv?nbr=1000{Config.KJ_HISTORY_DOWNLOAD}"  # 更新
         kj_rows = await self.download_csv_data(kj_csv_url)
         if kj_rows:
             self.history_cache.clear()
@@ -1780,8 +1783,8 @@ class Account:
     current_streak_count_kill: int = 0
     current_streak_messages: List[Dict] = field(default_factory=list)
 
-    recommend_mode: bool = False          # 是否启用动态推荐模式
-    risk_profile: str = "稳定"             # 风险偏好：保守、稳定、激进
+    recommend_mode: bool = False
+    risk_profile: str = "稳定"
 
     last_message_id: Optional[int] = None
     prediction_content: str = "double"
@@ -1791,7 +1794,6 @@ class Account:
         return self.display_name if self.display_name else self.phone
 
     def get_risk_factor(self) -> float:
-        """获取当前风险系数"""
         return Config.RISK_PROFILES.get(self.risk_profile, 0.01)
 
 # ==================== 账户管理器 ====================
@@ -2061,7 +2063,6 @@ class AmountManager:
         if param_name not in valid_params:
             return False, f"无效参数，可选: {', '.join(valid_params)}"
 
-        # 如果设置了基础金额，自动关闭推荐模式
         if param_name == 'base_amount':
             if amount > acc.balance:
                 return False, f"基础金额不能超过当前余额 {acc.balance:.2f}KK"
@@ -2111,7 +2112,6 @@ class BettingStrategyManager:
         if strategy_name not in self.strategies:
             return False, f"无效策略"
         cfg = self.strategies[strategy_name]
-        # 同时更新风险偏好（如果策略名称匹配）
         if strategy_name in ['保守', '平衡', '激进']:
             await self.account_manager.update_account(phone, risk_profile=strategy_name)
         await self.account_manager.update_account(
@@ -2662,17 +2662,14 @@ class GameScheduler:
             logger.log_betting(0, "余额为零或负数，跳过投注", f"账户:{phone}")
             return
 
-        # 如果启用了推荐模式，动态计算基础金额
         if acc.recommend_mode:
             risk = acc.get_risk_factor()
             dynamic_base = int(cur_bal * risk)
             dynamic_base = max(Config.MIN_BET_AMOUNT, min(acc.bet_params.max_amount, dynamic_base))
-            # 临时覆盖 bet_params.base_amount 仅用于本次计算
             temp_base = dynamic_base
         else:
             temp_base = acc.bet_params.base_amount
 
-        # 计算投注金额（使用临时基础金额）
         bet_amount, updates = self._calculate_bet_amount_with_base(acc, temp_base)
         if updates:
             await self.account_manager.update_account(phone, **updates)
@@ -2716,7 +2713,6 @@ class GameScheduler:
             logger.log_betting(0, "投注失败", f"账户:{phone}")
 
     def _calculate_bet_amount_with_base(self, acc: Account, base_override: int) -> Tuple[int, Dict]:
-        """根据策略和连输连赢计算投注金额，允许临时覆盖基础金额"""
         base = base_override
         max_amt = acc.bet_params.max_amount
         losses = acc.consecutive_losses
@@ -2979,7 +2975,6 @@ class GlobalScheduler:
         self.bet_semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_BETS)
         self.tasks = set()
 
-        # 覆盖模型的_check_new_result方法
         self.model._check_new_result = self._check_new_result
 
     def _is_maintenance_time(self, now: datetime) -> bool:
@@ -2997,14 +2992,14 @@ class GlobalScheduler:
     async def _download_history_during_maintenance(self):
         try:
             logger.log_system("维护时段：开始下载历史数据...")
-            kj_url = f"https://pc28.help/history/kj.csv?nbr=1000{Config.KJ_HISTORY_DOWNLOAD}"
+            kj_url = f"https://pc28.help/api/history/kj.csv?nbr=1000{Config.KJ_HISTORY_DOWNLOAD}"
             kj_rows = await self.api.download_csv_data(kj_url)
             kj_data = []
             for row in kj_rows:
                 parsed = self.api._parse_kj_csv_row(row)
                 if parsed:
                     kj_data.append(parsed)
-            keno_url = f"https://pc28.help/api/keno.json?nbr=1000{Config.KENO_HISTORY_DOWNLOAD}"
+            keno_url = f"https://pc28.help/api/history/keno.csv?nbr=1000{Config.KENO_HISTORY_DOWNLOAD}"
             keno_rows = await self.api.download_csv_data(keno_url)
             keno_data = []
             for row in keno_rows:
@@ -3161,7 +3156,6 @@ class GlobalScheduler:
             await self.game_scheduler.execute_bet(phone, prediction, latest)
 
     async def _check_new_result(self):
-        """供ModelManager调用的新开奖检测"""
         current = await self.api.get_latest_result()
         if current and current.get('qihao') != self.last_qihao:
             return True
@@ -3265,7 +3259,7 @@ class PC28Bot:
         await update.message.reply_text("🔄 开始离线训练，这可能需要几分钟...")
 
         try:
-            kj_url = f"https://pc28.help/history/kj.csv?nbr=1000{Config.KJ_HISTORY_DOWNLOAD}"
+            kj_url = f"https://pc28.help/api/history/kj.csv?nbr=1000{Config.KJ_HISTORY_DOWNLOAD}"
             kj_rows = await self.api.download_csv_data(kj_url)
             kj_data = []
             for row in kj_rows:
@@ -3273,7 +3267,7 @@ class PC28Bot:
                 if parsed:
                     kj_data.append(parsed)
 
-            keno_url = f"https://pc28.help/history/keno.csv?nbr=1000{Config.KENO_HISTORY_DOWNLOAD}"
+            keno_url = f"https://pc28.help/api/history/keno.csv?nbr=1000{Config.KENO_HISTORY_DOWNLOAD}"
             keno_rows = await self.api.download_csv_data(keno_url)
             keno_data = []
             for row in keno_rows:
@@ -3397,7 +3391,6 @@ class PC28Bot:
             return Config.LOGIN_PASSWORD
         except PhoneCodeExpiredError:
             await update.message.reply_text("❌ 验证码已过期，请重新获取。")
-            # 重新发送验证码
             try:
                 res = await client.send_code_request(phone)
                 self.account_manager.set_login_session(phone, {'phone_code_hash': res.phone_code_hash})
@@ -3643,7 +3636,6 @@ class PC28Bot:
         user = query.from_user.id
         logger.log_account(user, "", f"回调数据: {data}")
 
-        # 优先处理特定回调
         if data.startswith('amount_recommend:'):
             await self.amount_recommend(update, context)
             return
@@ -3895,15 +3887,13 @@ class PC28Bot:
             return
 
         if acc.recommend_mode:
-            # 如果已经是推荐模式，点击则退出
             await self.account_manager.update_account(phone, recommend_mode=False)
             await query.edit_message_text("✅ 已退出推荐模式，恢复手动设置")
             await self._show_amount_menu_callback(query, user, phone)
             return
 
-        # 否则询问是否启用推荐模式（不再计算推荐金额，因为会自动根据余额动态调整）
         keyboard = [
-            [InlineKeyboardButton("✅ 确认启用推荐模式", callback_data=f"amount_set_confirm:{phone}:0")],  # 金额参数保留但未使用
+            [InlineKeyboardButton("✅ 确认启用推荐模式", callback_data=f"amount_set_confirm:{phone}:0")],
             [InlineKeyboardButton("❌ 取消", callback_data=f"amount_menu:{phone}")]
         ]
         await query.edit_message_text(
@@ -3914,7 +3904,7 @@ class PC28Bot:
     async def amount_set_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        _, phone, _ = query.data.split(':')  # 忽略金额参数
+        _, phone, _ = query.data.split(':')
         user = query.from_user.id
 
         acc = self.account_manager.get_account(phone)
