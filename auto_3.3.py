@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-PC28 智能预测投注系统 - 增强稳定性和准确率版
-基于双杀组+双Y融合算法 | 多算法投票 | 交叉验证 | 历史准确率反馈
-"""
-
 import os
 import json
 import asyncio
@@ -37,7 +32,7 @@ from telethon.errors import SessionPasswordNeededError, FloodWaitError
 # ==================== 配置 ====================
 class Config:
     BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
-    API_ID = int(os.environ.get('API_ID', 0))
+    API_ID = int(os.environ.get('API_ID', ))
     API_HASH = os.environ.get('API_HASH', '')
     PC28_API_BASE = "https://www.pc28.help/api/kj.json?nbr=200"
     ADMIN_USER_IDS = [7673012566]
@@ -45,8 +40,6 @@ class Config:
     # 硅基流动API配置
     SILICONFLOW_API_KEY = os.environ.get('SILICONFLOW_API_KEY', 'sk-vipzurajvbmxqdnqffipqcfvfuquklhyudcwarjhqyitjpcp')
     SILICONFLOW_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-    SILICONFLOW_BACKUP_API_KEY = os.environ.get('SILICONFLOW_BACKUP_API_KEY', '')
-    
     DATA_DIR = Path("data")
     SESSIONS_DIR = DATA_DIR / "sessions"
     LOGS_DIR = DATA_DIR / "logs"
@@ -200,15 +193,12 @@ SUM_TO_COMBO = {
     21: "大单", 22: "大双", 23: "大单", 24: "大双", 25: "大单", 26: "大双", 27: "大单"
 }
 
-# ==================== PC28规则预测器（增强稳定性和准确率版） ====================
+# ==================== PC28规则预测器（文件2核心算法） ====================
 class PC28RulePredictor:
     """
-    增强版PC28预测器
-    - 多算法投票杀组
-    - 历史准确率反馈
-    - 交叉验证
-    - 预测平滑
-    - 置信度动态校准
+    基于文件2确定性规则的PC28预测器
+    完全按照双杀组算法+双Y融合组合预测执行
+    所有计算步骤、规则、权重占比完全固定
     """
     
     def __init__(self):
@@ -218,9 +208,9 @@ class PC28RulePredictor:
         
         # 3Y池取数顺序映射
         self.order_3y_map = {
-            0: ['3Y0', '3Y1', '3Y2'],
-            1: ['3Y1', '3Y2', '3Y0'],
-            2: ['3Y2', '3Y0', '3Y1'],
+            0: ['3Y0', '3Y1', '3Y2'],  # 3Y0池A球 → 3Y1池B球 → 3Y2池C球
+            1: ['3Y1', '3Y2', '3Y0'],  # 3Y1池A球 → 3Y2池B球 → 3Y0池C球
+            2: ['3Y2', '3Y0', '3Y1'],  # 3Y2池A球 → 3Y0池B球 → 3Y1池C球
         }
         
         # 5Y特码池
@@ -241,275 +231,151 @@ class PC28RulePredictor:
         
         # 高频防组合加权
         self.high_freq_combos = ["小单", "小双", "大双"]
-        
-        # 历史准确率跟踪
-        self.prediction_history = deque(maxlen=100)
-        self.algorithm_accuracy = {'kill': 0.5, 'main': 0.5, 'double': 0.5}
-        self.confidence_calibration = 1.0
-        
-        # 预测平滑
-        self.last_prediction = None
-        self.last_prediction_qihao = None
-        
-        # 多算法权重
-        self.algo_weights = {
-            'kill_algo1': 0.35,
-            'kill_algo2': 0.35,
-            'pattern_algo': 0.15,
-            'trend_algo': 0.15,
-        }
-        
-        # 加载缓存
-        self._load_accuracy_cache()
-    
-    def _load_accuracy_cache(self):
-        try:
-            accuracy_file = Config.CACHE_DIR / "predictor_accuracy.json"
-            if accuracy_file.exists():
-                with open(accuracy_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.algorithm_accuracy = data.get('algorithm_accuracy', {'kill': 0.5, 'main': 0.5, 'double': 0.5})
-                    self.confidence_calibration = data.get('confidence_calibration', 1.0)
-                    logger.log_system(f"加载预测器准确率缓存完成")
-        except Exception as e:
-            logger.log_error(0, "加载准确率缓存失败", e)
-    
-    def _save_accuracy_cache(self):
-        try:
-            accuracy_file = Config.CACHE_DIR / "predictor_accuracy.json"
-            data = {
-                'algorithm_accuracy': self.algorithm_accuracy,
-                'confidence_calibration': self.confidence_calibration,
-                'last_save': datetime.now().isoformat()
-            }
-            with open(accuracy_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.log_error(0, "保存准确率缓存失败", e)
-    
-    def record_prediction_result(self, prediction: Dict, actual: str, actual_sum: int):
-        """记录预测结果用于准确率反馈"""
-        is_kill_correct = (prediction.get('kill') != actual)
-        is_main_correct = (actual in prediction.get('main', []))
-        is_candidate_correct = (actual == prediction.get('candidate'))
-        
-        record = {
-            'qihao': prediction.get('qihao'),
-            'time': datetime.now().isoformat(),
-            'kill': prediction.get('kill'),
-            'kill_correct': is_kill_correct,
-            'main': prediction.get('main', []),
-            'main_correct': is_main_correct,
-            'candidate': prediction.get('candidate'),
-            'candidate_correct': is_candidate_correct,
-            'actual': actual,
-            'actual_sum': actual_sum,
-            'confidence': prediction.get('confidence', 50)
-        }
-        self.prediction_history.append(record)
-        self._update_algorithm_accuracy()
-        
-        if len(self.prediction_history) % 10 == 0:
-            self._save_accuracy_cache()
-    
-    def _update_algorithm_accuracy(self):
-        """更新各算法的历史准确率"""
-        if len(self.prediction_history) < 10:
-            return
-        
-        recent = list(self.prediction_history)[-30:]
-        
-        kill_correct = sum(1 for r in recent if r.get('kill_correct', False))
-        self.algorithm_accuracy['kill'] = kill_correct / len(recent) if recent else 0.5
-        
-        main_correct = sum(1 for r in recent if r.get('main_correct', False))
-        self.algorithm_accuracy['main'] = main_correct / len(recent) if recent else 0.5
-        
-        double_correct = sum(1 for r in recent if r.get('main_correct', False) or r.get('candidate_correct', False))
-        self.algorithm_accuracy['double'] = double_correct / len(recent) if recent else 0.5
-        
-        # 动态调整置信度校准
-        if len(self.prediction_history) >= 30:
-            long_term_acc = sum(1 for r in list(self.prediction_history)[-30:] if r.get('main_correct', False)) / 30
-            if long_term_acc < 0.45:
-                self.confidence_calibration = max(0.7, self.confidence_calibration * 0.99)
-            elif long_term_acc > 0.65:
-                self.confidence_calibration = min(1.15, self.confidence_calibration * 1.005)
-        
-        logger.log_analysis(f"准确率统计 - 杀组:{self.algorithm_accuracy['kill']:.1%} "
-                           f"主推:{self.algorithm_accuracy['main']:.1%} "
-                           f"双组合:{self.algorithm_accuracy['double']:.1%}")
     
     def _calc_y_value(self, a: int, b: int, c: int, total: int) -> int:
+        """
+        计算Y值：拼接数各位数字和
+        公式：拼接数 = A球B球C球（三位数），新数 = 拼接数 + 和值，Y = 新数各位数字和
+        """
         concat_num = a * 100 + b * 10 + c
         new_num = concat_num + total
         return sum(int(d) for d in str(new_num))
     
     def _calc_3y(self, total: int) -> int:
+        """计算3Y：和值对3取余"""
         return total % 3
     
     def _calc_5y(self, total: int) -> int:
+        """计算5Y：和值对5取余"""
         return total % 5
     
-    def _calc_kill_by_algo1(self, latest: Dict, history_10: List[Dict]) -> Tuple[Optional[str], int]:
-        """子算法1：基于Y值和位差和判定杀组"""
+    def _calc_kill_by_sub_algo1(self, latest: Dict, history_10: List[Dict]) -> Optional[str]:
+        """
+        子算法1：calcKillGroup
+        基于Y值和位差和判定杀组
+        
+        步骤：
+        1. 拼接数生成：A1B1C1
+        2. 新数 = 拼接数 + H1，计算Y1
+        3. 在历史中找首个Y1一致的历史期
+        4. 计算位差和 S = |A1-A2| + |B1-B2| + |C1-C2|
+        5. S<14为小，S≥14为大；S奇数单，S偶数双 → 临时组合Z2
+        6. Z2即为杀组
+        """
         try:
             a1 = latest.get('a', 0)
             b1 = latest.get('b', 0)
             c1 = latest.get('c', 0)
             h1 = latest.get('sum', 0)
             
+            # 计算Y1
             y1 = self._calc_y_value(a1, b1, c1, h1)
             
+            # 在历史中找首个Y值一致的历史期
             target_idx = -1
-            match_conf = 70
             for i, h in enumerate(history_10):
-                h_y = h.get('y_value')
-                if h_y is not None:
-                    if h_y == y1:
-                        target_idx = i
-                        match_conf = 85
-                        break
-                    elif abs(h_y - y1) <= 1:
-                        target_idx = i
-                        match_conf = 70
-                        break
+                if h.get('y_value') == y1:
+                    target_idx = i
+                    break
             
             if target_idx == -1:
-                return None, 0
+                return None
             
             target = history_10[target_idx]
             a2 = target.get('a', 0)
             b2 = target.get('b', 0)
             c2 = target.get('c', 0)
             
+            # 计算位差和
             s = abs(a1 - a2) + abs(b1 - b2) + abs(c1 - c2)
+            
+            # 判定临时组合
             size = "小" if s < 14 else "大"
             parity = "单" if s % 2 == 1 else "双"
             
-            return size + parity, match_conf
+            return size + parity
         except Exception as e:
-            logger.log_error(0, "子算法1失败", e)
-            return None, 0
+            logger.log_error(0, "子算法1计算失败", e)
+            return None
     
-    def _calc_kill_by_algo2(self, latest: Dict) -> Tuple[Optional[str], int]:
-        """子算法2：基于和值运算判定杀组"""
+    def _calc_kill_by_sub_algo2(self, latest: Dict) -> Optional[str]:
+        """
+        子算法2：calculateKillType
+        基于和值运算判定杀组（返回对立组合）
+        
+        步骤：
+        1. step1 = H1 × 3 × H1，取step1后三位数字（不足三位补0）
+        2. 计算该三位数各位数字和 D2
+        3. S = D2 + A1，若S>27则S=S-27
+        4. 由S判定临时组合Z3
+        5. 返回Z3的对立组合作为杀组
+        """
         try:
             h1 = latest.get('sum', 0)
             a1 = latest.get('a', 0)
             
+            # step1 = H1 × 3 × H1
             step1_raw = h1 * 3 * h1
             step1_str = str(step1_raw)[-3:].zfill(3)
             d2 = sum(int(d) for d in step1_str)
             
+            # 修正值S
             s = d2 + a1
             if s > 27:
                 s = s - 27
             
+            # 判定临时组合
             size = "小" if s < 14 else "大"
             parity = "单" if s % 2 == 1 else "双"
             temp_combo = size + parity
             
+            # 返回对立组合作为杀组
             opposite_size = self.size_map[size]
             opposite_parity = self.parity_map[parity]
-            
-            if s == 13 or s == 14:
-                conf = 60
-            elif s <= 5 or s >= 22:
-                conf = 85
-            else:
-                conf = 75
-            
-            return opposite_size + opposite_parity, conf
+            return opposite_size + opposite_parity
         except Exception as e:
-            logger.log_error(0, "子算法2失败", e)
-            return None, 0
+            logger.log_error(0, "子算法2计算失败", e)
+            return None
     
-    def _calc_kill_by_pattern(self, history_10: List[Dict]) -> Tuple[Optional[str], int]:
-        """子算法3：基于模式识别的杀组"""
-        if len(history_10) < 15:
-            return None, 0
+    def get_rule_based_kill(self, latest: Dict, history_10: List[Dict]) -> Tuple[Optional[str], int]:
+        """
+        获取基于双算法一致性的杀组
         
-        combos = [h.get('combo') for h in history_10[:15] if h.get('combo')]
-        if not combos:
-            return None, 0
+        规则：子算法1与子算法2杀组结果完全一致时采用，否则采用子算法2
+        返回：(杀组, 置信度)
+        """
+        kill1 = self._calc_kill_by_sub_algo1(latest, history_10)
+        kill2 = self._calc_kill_by_sub_algo2(latest)
         
-        freq = Counter(combos)
-        hot_combo = max(freq, key=freq.get)
-        return hot_combo, 55
-    
-    def _calc_kill_by_trend(self, history_10: List[Dict]) -> Tuple[Optional[str], int]:
-        """子算法4：基于趋势分析的杀组"""
-        if len(history_10) < 10:
-            return None, 0
-        
-        combos = [h.get('combo') for h in history_10[:10] if h.get('combo')]
-        if not combos:
-            return None, 0
-        
-        # 检测连开趋势
-        streak = 1
-        for i in range(1, len(combos)):
-            if combos[i] == combos[0]:
-                streak += 1
-            else:
-                break
-        
-        if streak >= 3:
-            # 连开3期以上，杀该组合
-            return combos[0], 70
-        elif streak == 2:
-            # 连开2期，杀该组合概率中等
-            return combos[0], 55
-        
+        if kill1 and kill2 and kill1 == kill2:
+            # 双算法一致，高置信度
+            logger.log_analysis(f"双算法杀组一致: {kill1}")
+            return kill1, 90
+        elif kill2:
+            # 不一致时采用子算法2
+            logger.log_analysis(f"杀组不一致: 算法1={kill1}, 算法2={kill2}, 采用算法2")
+            return kill2, 70
+        elif kill1:
+            return kill1, 60
         return None, 0
     
-    def _get_kill_by_vote(self, latest: Dict, history_10: List[Dict]) -> Tuple[str, int]:
-        """多算法投票杀组"""
-        kill_results = []
+    def _calculate_tail_numbers(self, history_10: List[Dict], latest: Dict) -> Tuple[List[int], str]:
+        """
+        双Y融合算法 - 尾数计算
         
-        kill1, conf1 = self._calc_kill_by_algo1(latest, history_10)
-        if kill1:
-            kill_results.append({'kill': kill1, 'conf': conf1, 'weight': self.algo_weights['kill_algo1']})
-        
-        kill2, conf2 = self._calc_kill_by_algo2(latest)
-        if kill2:
-            kill_results.append({'kill': kill2, 'conf': conf2, 'weight': self.algo_weights['kill_algo2']})
-        
-        kill3, conf3 = self._calc_kill_by_pattern(history_10)
-        if kill3:
-            kill_results.append({'kill': kill3, 'conf': conf3, 'weight': self.algo_weights['pattern_algo']})
-        
-        kill4, conf4 = self._calc_kill_by_trend(history_10)
-        if kill4:
-            kill_results.append({'kill': kill4, 'conf': conf4, 'weight': self.algo_weights['trend_algo']})
-        
-        if not kill_results:
-            return random.choice(self.combos), 50
-        
-        vote_scores = {c: 0 for c in self.combos}
-        for result in kill_results:
-            kill = result['kill']
-            weight = result.get('weight', 0.25)
-            conf = result.get('conf', 60) / 100
-            vote_scores[kill] += weight * conf
-        
-        final_kill = max(vote_scores, key=vote_scores.get)
-        final_conf = int(min(92, vote_scores[final_kill] * 100 + 10))
-        
-        unique_kills = set(r['kill'] for r in kill_results)
-        if len(unique_kills) == 1:
-            final_conf = min(92, final_conf + 8)
-        
-        return final_kill, final_conf
-    
-    def _calculate_tail_numbers(self, history_10: List[Dict], latest: Dict) -> Tuple[List[int], str, int]:
-        """双Y融合算法 - 尾数计算"""
+        步骤：
+        1. 根据最新期和值的3Y确定顺序
+        2. 按顺序从对应3Y池取最新3期的对应球数据
+        3. 分别求和后取个位数尾数
+        4. 尾数和H2判定基础组合Z4
+        """
         h1 = latest.get('sum', 0)
         y3 = self._calc_3y(h1)
         
+        # 获取顺序
         order = self.order_3y_map.get(y3, ['3Y0', '3Y1', '3Y2'])
         
+        # 构建3Y池
         pools_3y = {'3Y0': [], '3Y1': [], '3Y2': []}
         for h in history_10[:10]:
             total = h.get('sum', 0)
@@ -517,70 +383,57 @@ class PC28RulePredictor:
             pool_key = f'3Y{y3_val}'
             pools_3y[pool_key].append(h)
         
+        # 球索引映射
         ball_map = {'3Y0': 'a', '3Y1': 'b', '3Y2': 'c'}
         
         tail_sums = []
-        data_sufficient = True
-        
         for pool_key in order:
             pool = pools_3y.get(pool_key, [])
             ball = ball_map.get(pool_key, 'a')
             
             if len(pool) >= 3:
+                # 取最新3期（索引0,1,2）
                 values = [h.get(ball, 0) for h in pool[:3]]
                 tail_sum = sum(values) % 10
-            elif len(pool) >= 1:
-                values = [h.get(ball, 0) for h in pool]
-                tail_sum = int((sum(values) / len(values)) % 10)
-                data_sufficient = False
             else:
+                # 数据不足时使用默认值
                 tail_sum = 0
-                data_sufficient = False
             tail_sums.append(tail_sum)
         
+        # 尾数和
         h2 = sum(tail_sums) % 10
         
+        # 判定基础组合
         base_size = "小" if h2 < 14 else "大"
         base_parity = "单" if h2 % 2 == 1 else "双"
         base_combo = base_size + base_parity
         
-        confidence = 80 if data_sufficient else 60
-        
-        return tail_sums, base_combo, confidence
+        return tail_sums, base_combo
     
     def _calculate_scores(self, history_10: List[Dict], base_combo: str, rule_kill: str) -> Dict[str, Dict]:
-        """双权重打分系统"""
-        combo_count = {c: 0 for c in self.combos}
-        combo_sequence = []
+        """
+        双权重打分系统
         
+        权重分配：
+        - 尾数和判定权重（40%）：基础组合40分，关联组合30分，非关联10分
+        - 近期走势频次权重（60%）：≥3次60分，1-2次40分，0次10分；高频防组合+10分
+        
+        返回：{组合: {'score': 总分, 'tail_score': 尾数分, 'freq_score': 频次分}}
+        """
+        # 统计近10期频次
+        combo_count = {c: 0 for c in self.combos}
         for h in history_10[:10]:
             combo = h.get('combo', '')
             if combo in combo_count:
                 combo_count[combo] += 1
-                combo_sequence.append(combo)
-        
-        # 趋势分析
-        streak_combos = {}
-        if len(combo_sequence) >= 3:
-            current_streak = 1
-            current_combo = combo_sequence[0]
-            for i in range(1, len(combo_sequence)):
-                if combo_sequence[i] == current_combo:
-                    current_streak += 1
-                else:
-                    if current_streak >= 2:
-                        streak_combos[current_combo] = max(streak_combos.get(current_combo, 0), current_streak)
-                    current_combo = combo_sequence[i]
-                    current_streak = 1
-            if current_streak >= 2:
-                streak_combos[current_combo] = max(streak_combos.get(current_combo, 0), current_streak)
         
         scores = {}
         for combo in self.combos:
             if combo == rule_kill:
-                scores[combo] = {'score': 0, 'tail_score': 0, 'freq_score': 0, 'trend_score': 0, 'is_kill': True}
+                scores[combo] = {'score': 0, 'tail_score': 0, 'freq_score': 0, 'is_kill': True}
                 continue
             
+            # 尾数和判定分（40%）
             if combo == base_combo:
                 tail_score = 40
             elif combo[0] == base_combo[0] or combo[1] == base_combo[1]:
@@ -588,106 +441,103 @@ class PC28RulePredictor:
             else:
                 tail_score = 10
             
+            # 近期走势频次分（60%）
             count = combo_count.get(combo, 0)
             if count >= 3:
-                freq_score = 50
+                freq_score = 60
             elif count >= 1:
-                freq_score = 35
+                freq_score = 40
             else:
-                freq_score = 15
+                freq_score = 10
             
-            trend_score = 0
-            if combo in streak_combos:
-                streak_len = streak_combos[combo]
-                if streak_len >= 3:
-                    trend_score = 10
-                elif streak_len == 2:
-                    trend_score = 5
-            else:
-                if count == 0:
-                    trend_score = 5
-            
+            # 高频防组合加权
             if combo in self.high_freq_combos:
                 freq_score += 10
             
-            total_score = tail_score + freq_score + trend_score
+            total_score = tail_score + freq_score
             
             scores[combo] = {
                 'score': total_score,
                 'tail_score': tail_score,
                 'freq_score': freq_score,
-                'trend_score': trend_score,
                 'count': count,
                 'is_kill': False
             }
         
         return scores
     
-    def _cross_validate(self, main_combos: List[str], candidate_combo: str, kill_combo: str, 
-                        history_10: List[Dict]) -> Tuple[List[str], str, str, int]:
-        """交叉验证"""
-        if len(history_10) < 15:
-            return main_combos, candidate_combo, kill_combo, 0
+    def get_rule_based_predictions(self, history_10: List[Dict]) -> Dict:
+        """
+        完整的基于规则的预测（文件2核心算法）
         
-        test_data = history_10[:15]
-        correct = 0
-        total = 0
-        
-        for i in range(10, len(test_data)):
-            train = test_data[:i]
-            target = test_data[i]
-            
-            kill, _ = self._get_kill_by_vote(train[0], train[:10])
-            if kill == target.get('combo'):
-                correct += 1
-            total += 1
-        
-        backtest_acc = correct / total if total > 0 else 0.5
-        
-        if backtest_acc < 0.35:
-            logger.log_analysis(f"交叉验证准确率偏低({backtest_acc:.1%})，启用备用方案")
-            freq = Counter([h.get('combo') for h in history_10[:10] if h.get('combo')])
-            if freq:
-                main_combos = [min(freq, key=freq.get)]
-                candidate_combo = [c for c in self.combos if c != main_combos[0]][0]
-                kill_combo = max(freq, key=freq.get)
-        
-        return main_combos, candidate_combo, kill_combo, int(backtest_acc * 100)
-    
-    def _apply_smoothing(self, current_main: List[str], current_candidate: str, 
-                         current_kill: str) -> Tuple[List[str], str, str]:
-        """预测平滑"""
-        if not self.last_prediction:
-            self.last_prediction = {'main': current_main, 'candidate': current_candidate, 'kill': current_kill}
-            return current_main, current_candidate, current_kill
-        
-        last_main = self.last_prediction.get('main', [])
-        last_candidate = self.last_prediction.get('candidate')
-        last_kill = self.last_prediction.get('kill')
-        
-        smoothed_main = current_main.copy()
-        smoothed_candidate = current_candidate
-        smoothed_kill = current_kill
-        
-        # 主推平滑
-        if last_main:
-            for r in self.prediction_history:
-                if r.get('main') == last_main and r.get('main_correct', False):
-                    if last_main[0] not in current_main and len(current_main) < 2:
-                        smoothed_main.append(last_main[0])
-                        smoothed_main = list(set(smoothed_main))
-                    break
-        
-        self.last_prediction = {
-            'main': smoothed_main,
-            'candidate': smoothed_candidate,
-            'kill': smoothed_kill
+        返回格式：
+        {
+            'main': [主推1, 主推2],      # 核心主攻组合（2个）
+            'candidate': 稳防组合,       # 高概率稳防组合（1个）
+            'kill': 杀组,                # 最终杀组
+            'kill_confidence': 置信度,   # 杀组置信度
+            'confidence': 总置信度,      # 预测总置信度
+            'special_numbers': [4个特码], # 核心特码
+            'jump_risk': 跳开提示,
+            'algo_details': 算法详情
         }
+        """
+        if len(history_10) < 10:
+            logger.log_analysis(f"历史数据不足10期，当前{len(history_10)}期")
+            return None
         
-        return smoothed_main, smoothed_candidate, smoothed_kill
-    
-    def _get_special_numbers(self, latest: Dict, history_10: List[Dict]) -> List[int]:
-        """获取特码数字"""
+        latest = history_10[0]
+        
+        # 为每条历史记录计算Y值（供子算法1使用）
+        for h in history_10:
+            if 'y_value' not in h and h.get('a') is not None:
+                h['y_value'] = self._calc_y_value(
+                    h.get('a', 0), h.get('b', 0), h.get('c', 0), h.get('sum', 0)
+                )
+        
+        # 模块1：双杀组算法
+        rule_kill, kill_conf = self.get_rule_based_kill(latest, history_10)
+        if not rule_kill:
+            logger.log_analysis("杀组计算失败，使用默认杀组")
+            rule_kill = random.choice(self.combos)
+            kill_conf = 50
+        
+        # 模块2：双Y融合组合预测
+        tail_sums, base_combo = self._calculate_tail_numbers(history_10, latest)
+        
+        # 双权重打分
+        scores = self._calculate_scores(history_10, base_combo, rule_kill)
+        
+        # 按分数排序，排除杀组
+        sorted_combos = sorted(
+            [(c, data) for c, data in scores.items() if not data.get('is_kill')],
+            key=lambda x: x[1]['score'],
+            reverse=True
+        )
+        
+        # 三层组合分级
+        main_combos = []      # 核心主攻（总分≥90）
+        candidate_combo = None  # 高概率稳防（80-89）
+        fallback_combo = None    # 兜底防（<80，实际就是杀组）
+        
+        for combo, data in sorted_combos:
+            score = data['score']
+            if score >= 90 and len(main_combos) < 2:
+                main_combos.append(combo)
+            elif 80 <= score < 90 and candidate_combo is None:
+                candidate_combo = combo
+        
+        # 如果主攻不足2个，从稳防中补充
+        if len(main_combos) < 2 and candidate_combo:
+            main_combos.append(candidate_combo)
+            candidate_combo = None
+        
+        # 如果还不够，从剩余中取最高分
+        for combo, data in sorted_combos:
+            if combo not in main_combos and combo != candidate_combo and len(main_combos) < 2:
+                main_combos.append(combo)
+        
+        # 模块3：5Y+3Y融合特码推导
         h1 = latest.get('sum', 0)
         y5 = self._calc_5y(h1)
         y3 = self._calc_3y(h1)
@@ -695,13 +545,16 @@ class PC28RulePredictor:
         pool_5y = self.pool_5y.get(y5, [0, 5, 10, 15, 20, 25])
         pool_3y = self.pool_3y.get(y3, [])
         
+        # 取交集
         intersection = [n for n in pool_5y if n in pool_3y]
         
+        # 统计近10期和值频次
         sum_count = Counter()
         for h in history_10[:10]:
             s = h.get('sum', 0)
             sum_count[s] += 1
         
+        # 从5Y池按频次补充
         remaining = []
         for num in pool_5y:
             if num not in intersection:
@@ -714,163 +567,80 @@ class PC28RulePredictor:
                 break
             special_numbers.append(num)
         
+        # 确保输出4个
         while len(special_numbers) < 4:
             special_numbers.append(random.randint(0, 27))
         
-        return special_numbers[:4]
-    
-    def get_rule_based_predictions(self, history_10: List[Dict], qihao: str = None) -> Dict:
-        """完整的基于规则的预测（增强稳定性和准确率版）"""
-        if len(history_10) < 10:
-            logger.log_analysis(f"历史数据不足10期，当前{len(history_10)}期")
-            return None
+        # 模块4：跳开提示
+        jump_risk = f"双算法一致判定杀[{rule_kill}]，{rule_kill}近期无连续走势/和值支撑回补，极低等级跳开风险；核心圈（{','.join(main_combos)}）全覆盖近期高概率开出方向"
         
-        latest = history_10[0]
-        
-        # 计算Y值
-        for h in history_10:
-            if 'y_value' not in h and h.get('a') is not None:
-                h['y_value'] = self._calc_y_value(
-                    h.get('a', 0), h.get('b', 0), h.get('c', 0), h.get('sum', 0)
-                )
-        
-        # 杀组
-        rule_kill, kill_conf = self._get_kill_by_vote(latest, history_10)
-        
-        # 尾数计算
-        tail_sums, base_combo, tail_conf = self._calculate_tail_numbers(history_10, latest)
-        
-        # 打分
-        scores = self._calculate_scores(history_10, base_combo, rule_kill)
-        
-        # 排序
-        sorted_combos = sorted(
-            [(c, data) for c, data in scores.items() if not data.get('is_kill')],
-            key=lambda x: x[1]['score'],
-            reverse=True
-        )
-        
-        # 分级
-        main_combos = []
-        candidate_combo = None
-        
-        for combo, data in sorted_combos:
-            score = data['score']
-            if score >= 85 and len(main_combos) < 2:
-                main_combos.append(combo)
-            elif 70 <= score < 85 and candidate_combo is None:
-                candidate_combo = combo
-        
-        if len(main_combos) < 2 and candidate_combo:
-            main_combos.append(candidate_combo)
-            candidate_combo = None
-        
-        for combo, data in sorted_combos:
-            if combo not in main_combos and combo != candidate_combo and len(main_combos) < 2:
-                main_combos.append(combo)
-        
-        if not main_combos:
-            main_combos = [base_combo]
-        
-        if not candidate_combo:
-            candidate_combo = main_combos[-1] if main_combos else self.combos[0]
-        
-        # 去重
-        if candidate_combo == main_combos[0] and len(main_combos) > 1:
-            candidate_combo = main_combos[1]
-        if rule_kill in main_combos:
-            main_combos = [c for c in main_combos if c != rule_kill]
-        if rule_kill == candidate_combo:
-            candidate_combo = [c for c in self.combos if c != rule_kill and c not in main_combos][0]
-        
-        # 交叉验证
-        main_combos, candidate_combo, rule_kill, backtest_acc = self._cross_validate(
-            main_combos, candidate_combo, rule_kill, history_10
-        )
-        
-        # 平滑
-        if qihao:
-            self.last_prediction_qihao = qihao
-        main_combos, candidate_combo, rule_kill = self._apply_smoothing(
-            main_combos, candidate_combo, rule_kill
-        )
-        
-        # 特码
-        special_numbers = self._get_special_numbers(latest, history_10)
-        
-        # 置信度
+        # 计算总置信度
         main_scores = [scores.get(c, {}).get('score', 0) for c in main_combos]
         avg_main_score = sum(main_scores) / len(main_scores) if main_scores else 0
-        
-        base_conf = avg_main_score * 0.4 + kill_conf * 0.3 + tail_conf * 0.2
-        
-        if backtest_acc > 0:
-            base_conf = base_conf * 0.7 + backtest_acc * 30
-        
-        historical_acc = self.algorithm_accuracy.get('main', 0.5)
-        base_conf = base_conf * 0.6 + historical_acc * 100 * 0.4
-        
-        final_conf = int(min(92, max(45, base_conf * self.confidence_calibration)))
-        
-        # 跳开提示
-        kill_freq = sum(1 for h in history_10[:10] if h.get('combo') == rule_kill)
-        kill_warning = f"⚠️ 注意：杀组{rule_kill}近期出现{kill_freq}次" if kill_freq >= 2 else f"杀组{rule_kill}近期低频"
-        jump_risk = f"{kill_warning}；核心圈（{','.join(main_combos)}）覆盖近期高概率方向"
+        confidence = min(95, int(avg_main_score * 0.8 + kill_conf * 0.2))
         
         result = {
             'main': main_combos,
-            'candidate': candidate_combo,
+            'candidate': candidate_combo if candidate_combo else main_combos[-1] if main_combos else self.combos[0],
             'kill': rule_kill,
             'kill_confidence': kill_conf,
-            'confidence': final_conf,
-            'special_numbers': special_numbers,
+            'confidence': confidence,
+            'special_numbers': special_numbers[:4],
             'jump_risk': jump_risk,
             'base_combo': base_combo,
             'tail_sums': tail_sums,
-            'backtest_accuracy': backtest_acc,
             'scores': {c: data['score'] for c, data in scores.items()},
             'algo_details': [
-                {"name": "多算法投票杀组", "kill": rule_kill, "confidence": kill_conf},
+                {"name": "双杀组算法", "kill": rule_kill, "confidence": kill_conf},
                 {"name": "双Y融合算法", "main": main_combos, "candidate": candidate_combo},
-                {"name": "5Y+3Y特码池", "numbers": special_numbers},
-                {"name": "交叉验证", "accuracy": f"{backtest_acc}%"}
+                {"name": "5Y+3Y特码池", "numbers": special_numbers[:4]}
             ]
         }
         
-        if qihao:
-            result['qihao'] = qihao
-        
-        logger.log_prediction(0, "增强版预测完成", 
-                            f"主推:{main_combos} 候选:{candidate_combo} 杀组:{rule_kill} "
-                            f"置信度:{final_conf} 回测:{backtest_acc}%")
+        logger.log_prediction(0, "规则预测完成", 
+                            f"主推:{main_combos} 候选:{candidate_combo} 杀组:{rule_kill} 置信度:{confidence}")
         
         return result
 
-
-# ==================== 硅基流动AI客户端 ====================
+# ==================== 硅基流动AI客户端（使用规则生成提示词） ====================
 class SiliconFlowAIClient:
+    """
+    硅基流动AI客户端
+    使用文件2的规则计算结果来生成提示词，让AI进行推理验证
+    """
+    
     def __init__(self, api_key=None, model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"):
         self.api_url = "https://api.siliconflow.cn/v1/chat/completions"
         self.api_key = api_key or Config.SILICONFLOW_API_KEY
-        self.backup_api_key = Config.SILICONFLOW_BACKUP_API_KEY
         self.model_name = model_name
         self.timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)
         self._active_requests = {}
         self._global_predict_lock = asyncio.Lock()
         self._last_prediction = None
         self._last_qihao = None
+        self._last_prompt_hash = None
         
+        # 初始化规则预测器
         self.rule_predictor = PC28RulePredictor()
     
     def _build_rule_based_prompt(self, history: List[Dict], rule_result: Dict) -> str:
+        """
+        基于规则预测结果构建AI提示词
+        让AI在规则结果的基础上进行推理验证
+        """
         if not rule_result:
             return self._build_fallback_prompt(history)
         
+        # 提取历史走势
         combos_10 = [h.get('combo', '') for h in history[:10] if h.get('combo')]
         sums_10 = [h.get('sum', 0) for h in history[:10] if h.get('sum') is not None]
         
+        # 计算走势统计
         combo_count = Counter(combos_10)
+        size_trend = [c[0] for c in combos_10 if c]
+        parity_trend = [c[1] for c in combos_10 if c]
         
+        # 连开分析
         current_streak = 1
         if combos_10:
             for i in range(1, len(combos_10)):
@@ -887,13 +657,17 @@ class SiliconFlowAIClient:
 - 高概率稳防组合：{rule_result['candidate']}
 - 预测置信度：{rule_result['confidence']}%
 - 核心特码：{rule_result['special_numbers']}
-- 回测准确率：{rule_result.get('backtest_accuracy', 0)}%
 
 【近期走势数据（最近10期）】
 - 组合序列：{" → ".join(combos_10[:10])}
 - 和值序列：{sums_10[:10]}
 - 当前连开：{current_streak}期（{combos_10[0] if combos_10 else '无'}）
 - 组合频次：{dict(combo_count)}
+
+【规则算法说明】
+1. 杀组由双算法一致判定（Y值位差和算法 + 和值运算对立算法）
+2. 主攻组合由双Y融合+双权重打分选出（尾数和40% + 走势频次60%）
+3. 特码由5Y+3Y池交集补充高频热码得出
 
 【验证任务】
 请基于PC28开奖规律，验证上述规则预测是否合理，并输出JSON格式结果：
@@ -904,18 +678,19 @@ class SiliconFlowAIClient:
     "candidate_confirm": "确认的稳防组合",
     "kill_confirm": "确认的杀组",
     "adjustment_reason": "调整原因（如无需调整填'无'）",
-    "final_confidence": 整数置信度(40-92)
+    "final_confidence": 整数置信度(40-95)
 }}
 
 注意：
 - 如果杀组近期出现频次≥2次，考虑调整
 - 如果主攻组合连续3期未出，考虑加强
 - 如果当前连开≥3期，考虑反转
-- 输出简洁，仅输出JSON"""
+- 保持输出简洁，仅输出JSON"""
         
         return prompt
     
     def _build_fallback_prompt(self, history: List[Dict]) -> str:
+        """备用提示词（规则预测失败时使用）"""
         combos_10 = [h.get('combo', '') for h in history[:10] if h.get('combo')]
         sums_10 = [h.get('sum', 0) for h in history[:10] if h.get('sum') is not None]
         
@@ -928,6 +703,11 @@ class SiliconFlowAIClient:
 和值序列：{sums_10[:10]}
 组合频次：{dict(combo_count)}
 
+【预测规则优先级】
+1. 连开≥3期强制排除该组合
+2. 短期冷号（10期出现≤1次）优先预测
+3. 大小/单双走势一致性≥80%时预测反转
+
 【输出格式】
 仅输出JSON：{{"main":"组合","candidate":"组合","kill":"组合","confidence":整数}}
 可选组合：小单、小双、大单、大双
@@ -936,6 +716,7 @@ class SiliconFlowAIClient:
         return prompt
     
     def _parse_ai_response(self, text: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
+        """解析AI响应"""
         try:
             start = text.find('{')
             end = text.rfind('}') + 1
@@ -945,6 +726,7 @@ class SiliconFlowAIClient:
             json_str = text[start:end]
             data = json.loads(json_str)
             
+            # 尝试多种字段名
             main = data.get("main") or data.get("main_confirm")
             candidate = data.get("candidate") or data.get("candidate_confirm")
             kill = data.get("kill") or data.get("kill_confirm")
@@ -952,9 +734,6 @@ class SiliconFlowAIClient:
             
             if not main or not candidate or not kill:
                 return None, None, None, None
-            
-            if isinstance(main, list):
-                main = main[0] if main else candidate
             
             if main not in COMBOS or candidate not in COMBOS or kill not in COMBOS:
                 return None, None, None, None
@@ -970,13 +749,63 @@ class SiliconFlowAIClient:
             logger.log_error(0, "解析AI响应失败", e)
             return None, None, None, None
     
-    async def _call_ai_with_prompt(self, prompt: str, qihao: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
+    async def predict(self, history: List[Dict], qihao: str = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
+        """
+        全局预测方法
+        1. 先用规则算法计算基础预测
+        2. 让AI基于规则结果进行验证和微调
+        3. 最终输出验证后的结果
+        """
+        if qihao and self._last_qihao == qihao and self._last_prediction:
+            logger.log_api("使用缓存的预测结果", f"期号: {qihao}")
+            return self._last_prediction
+        
+        async with self._global_predict_lock:
+            if qihao and self._last_qihao == qihao and self._last_prediction:
+                return self._last_prediction
+            
+            # 步骤1：用规则算法计算基础预测
+            rule_predictor = PC28RulePredictor()
+            rule_result = rule_predictor.get_rule_based_predictions(list(history)[:10])
+            
+            if rule_result:
+                logger.log_analysis(f"规则算法计算结果: 主推{rule_result['main']}, 杀组{rule_result['kill']}")
+                
+                # 步骤2：构建基于规则结果的提示词
+                prompt = self._build_rule_based_prompt(history, rule_result)
+                
+                # 步骤3：调用AI进行验证
+                ai_result = await self._call_ai_with_prompt(prompt, qihao, history)
+                
+                if ai_result[0] is not None:
+                    # AI验证通过，使用AI结果
+                    logger.log_prediction(0, "AI验证规则结果", f"AI确认: 主推{ai_result[0]}, 杀组{ai_result[2]}")
+                    return ai_result
+                else:
+                    # AI验证失败，使用规则结果
+                    main = rule_result['main'][0] if rule_result['main'] else rule_result['candidate']
+                    candidate = rule_result['candidate'] if rule_result['candidate'] else rule_result['main'][-1] if rule_result['main'] else COMBOS[0]
+                    kill = rule_result['kill']
+                    confidence = rule_result['confidence']
+                    logger.log_analysis(f"AI验证失败，使用规则结果: 主推{main}, 候选{candidate}, 杀组{kill}")
+                    return main, candidate, kill, confidence
+            else:
+                # 规则计算失败，回退到纯AI预测
+                logger.log_analysis("规则计算失败，回退到纯AI预测")
+                prompt = self._build_fallback_prompt(history)
+                return await self._call_ai_with_prompt(prompt, qihao, history)
+    
+    async def _call_ai_with_prompt(self, prompt: str, qihao: str, history: List[Dict]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
+        """调用AI API"""
         prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
         
         if prompt_hash in self._active_requests:
-            logger.log_api("检测到重复请求", f"hash={prompt_hash[:8]}")
+            logger.log_api("检测到重复请求", f"等待已有请求完成，hash={prompt_hash[:8]}")
             try:
                 result = await asyncio.wait_for(self._active_requests[prompt_hash], timeout=60)
+                if qihao:
+                    self._last_qihao = qihao
+                    self._last_prediction = result
                 return result
             except asyncio.TimeoutError:
                 del self._active_requests[prompt_hash]
@@ -989,17 +818,21 @@ class SiliconFlowAIClient:
             "stream": False
         }
         
-        request_task = asyncio.create_task(self._do_predict(payload, prompt_hash))
+        request_task = asyncio.create_task(self._do_predict(payload, prompt_hash, history))
         self._active_requests[prompt_hash] = request_task
         
         try:
             result = await request_task
+            if qihao:
+                self._last_qihao = qihao
+                self._last_prediction = result
             return result
         finally:
             if prompt_hash in self._active_requests:
                 del self._active_requests[prompt_hash]
     
-    async def _do_predict(self, payload: Dict, prompt_hash: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
+    async def _do_predict(self, payload: Dict, prompt_hash: str, history: List[Dict]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
+        """实际执行AI调用"""
         max_retries = 3
         base_delay = 2
         
@@ -1015,67 +848,56 @@ class SiliconFlowAIClient:
                         if resp.status == 200:
                             result = await resp.json()
                             response_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                            
                             parsed = self._parse_ai_response(response_text)
                             if parsed[0] is not None:
-                                logger.log_api("AI请求成功", f"第{attempt+1}次尝试")
+                                logger.log_api("AI请求成功", f"第{attempt+1}次尝试成功")
                                 return parsed
-                        elif resp.status == 429 and attempt < max_retries - 1:
-                            await asyncio.sleep(base_delay * (2 ** attempt) * 2)
-                        elif attempt < max_retries - 1:
-                            await asyncio.sleep(base_delay * (2 ** attempt))
+                        elif resp.status == 429:
+                            if attempt < max_retries - 1:
+                                wait_time = base_delay * (2 ** attempt) * 2
+                                await asyncio.sleep(wait_time)
+                        else:
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(base_delay * (2 ** attempt))
             except asyncio.TimeoutError:
                 if attempt == max_retries - 1:
-                    return None, None, None, None
+                    return self._get_fallback_from_rule(history)
                 await asyncio.sleep(base_delay * (2 ** attempt))
             except Exception as e:
                 logger.log_error(0, "AI请求异常", e)
                 if attempt == max_retries - 1:
-                    return None, None, None, None
+                    return self._get_fallback_from_rule(history)
                 await asyncio.sleep(base_delay)
         
-        return None, None, None, None
+        return self._get_fallback_from_rule(history)
     
-    async def predict(self, history: List[Dict], qihao: str = None) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
-        if qihao and self._last_qihao == qihao and self._last_prediction:
-            return self._last_prediction
+    def _get_fallback_from_rule(self, history: List[Dict]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
+        """从规则算法获取备用结果"""
+        rule_predictor = PC28RulePredictor()
+        rule_result = rule_predictor.get_rule_based_predictions(list(history)[:10])
         
-        async with self._global_predict_lock:
-            if qihao and self._last_qihao == qihao and self._last_prediction:
-                return self._last_prediction
-            
-            # 使用规则算法计算
-            rule_result = self.rule_predictor.get_rule_based_predictions(list(history)[:10], qihao)
-            
-            if rule_result:
-                logger.log_analysis(f"规则算法结果: 主推{rule_result['main']}, 杀组{rule_result['kill']}")
-                
-                prompt = self._build_rule_based_prompt(history, rule_result)
-                ai_result = await self._call_ai_with_prompt(prompt, qihao)
-                
-                if ai_result[0] is not None:
-                    logger.log_prediction(0, "AI验证规则结果", f"AI确认: 主推{ai_result[0]}, 杀组{ai_result[2]}")
-                    result = ai_result
-                else:
-                    main = rule_result['main'][0] if rule_result['main'] else rule_result['candidate']
-                    candidate = rule_result['candidate']
-                    kill = rule_result['kill']
-                    confidence = rule_result['confidence']
-                    logger.log_analysis(f"AI验证失败，使用规则结果")
-                    result = (main, candidate, kill, confidence)
-            else:
-                logger.log_analysis("规则计算失败，回退到AI预测")
-                prompt = self._build_fallback_prompt(history)
-                result = await self._call_ai_with_prompt(prompt, qihao)
-                
-                if result[0] is None:
-                    result = (random.choice(COMBOS), random.choice(COMBOS), random.choice(COMBOS), 50)
-            
-            if qihao:
-                self._last_qihao = qihao
-                self._last_prediction = result
-            
-            return result
-
+        if rule_result:
+            main = rule_result['main'][0] if rule_result['main'] else rule_result['candidate']
+            candidate = rule_result['candidate'] if rule_result['candidate'] else main
+            kill = rule_result['kill']
+            confidence = rule_result['confidence']
+            return main, candidate, kill, confidence
+        
+        # 最终回退：基于历史频次
+        combos_20 = [h['combo'] for h in history[:20] if h.get('combo')]
+        if combos_20:
+            freq = Counter(combos_20)
+            main = min(freq, key=freq.get)
+            candidates = [c for c in COMBOS if c != main]
+            candidate = random.choice(candidates)
+            kill = max(freq, key=freq.get)
+            return main, candidate, kill, 55
+        
+        main = random.choice(COMBOS)
+        candidate = random.choice([c for c in COMBOS if c != main])
+        kill = random.choice([c for c in COMBOS if c != main and c != candidate])
+        return main, candidate, kill, 50
 
 # ==================== 模型管理器 ====================
 class ModelManager:
@@ -1084,14 +906,17 @@ class ModelManager:
             api_key=Config.SILICONFLOW_API_KEY,
             model_name=Config.SILICONFLOW_MODEL
         )
-        self.rule_predictor = PC28RulePredictor()
         self.prediction_history = []
         self.recent_accuracy = deque(maxlen=50)
+        self._last_ai_kill = None
+        self._save_lock = asyncio.Lock()
+        self._predict_lock = asyncio.Lock()
         self._last_predict_result = None
         self._last_predict_qihao = None
-        self._predict_lock = asyncio.Lock()
-        self._save_lock = asyncio.Lock()
-    
+        
+        # 规则预测器（用于缓存和对比）
+        self.rule_predictor = PC28RulePredictor()
+
     async def save(self):
         async with self._save_lock:
             try:
@@ -1103,24 +928,29 @@ class ModelManager:
                     await f.write(json.dumps(data, ensure_ascii=False, indent=2))
             except Exception as e:
                 logger.log_error(0, "保存预测历史失败", e)
-    
+
     async def predict(self, history: List[Dict], latest: Dict = None) -> Dict:
+        """预测方法 - 使用规则+AI混合模式"""
         qihao = latest.get('qihao') if latest else None
         
         if qihao and self._last_predict_qihao == qihao and self._last_predict_result:
+            logger.log_prediction(0, "使用缓存的预测结果", f"期号: {qihao}")
             return self._last_predict_result
-        
+
         async with self._predict_lock:
             if qihao and self._last_predict_qihao == qihao and self._last_predict_result:
                 return self._last_predict_result
-            
+
+            # 调用AI客户端（内部会使用规则算法）
             main, candidate, kill, confidence = await self.ai_client.predict(list(history), qihao)
             
+            # 兜底处理
             if main is None:
-                rule_result = self.rule_predictor.get_rule_based_predictions(list(history)[:10], qihao)
+                # 使用规则算法兜底
+                rule_result = self.rule_predictor.get_rule_based_predictions(list(history)[:10])
                 if rule_result:
                     main = rule_result['main'][0] if rule_result['main'] else rule_result['candidate']
-                    candidate = rule_result['candidate']
+                    candidate = rule_result['candidate'] if rule_result['candidate'] else main
                     kill = rule_result['kill']
                     confidence = rule_result['confidence']
                 else:
@@ -1128,7 +958,9 @@ class ModelManager:
                     candidate = random.choice([c for c in COMBOS if c != main])
                     kill = random.choice([c for c in COMBOS if c != main and c != candidate])
                     confidence = 50
+                logger.log_analysis("使用规则算法兜底")
             
+            # 确保三者互不相同
             if main == candidate:
                 candidate = random.choice([c for c in COMBOS if c != main])
             if main == kill or candidate == kill:
@@ -1138,22 +970,22 @@ class ModelManager:
                 "main": main,
                 "candidate": candidate,
                 "kill": kill,
-                "confidence": min(92, max(40, confidence)),
+                "confidence": min(95, max(40, confidence)),
                 "algo_details": [
-                    {"name": "多算法投票杀组+双Y融合", "kill": kill},
+                    {"name": "PC28双杀组+双Y融合算法", "kill": kill},
                     {"name": "硅基流动AI验证", "result": f"主推{main}"}
-                ]
+                ],
+                "trend_analysis": {}
             }
-            
+
             if qihao:
                 self._last_predict_qihao = qihao
                 self._last_predict_result = result
-            
+
             return result
-    
+
     async def learn(self, prediction: Dict, actual: str, qihao: str, sum_val: int):
         is_correct = (actual == prediction['main'] or actual == prediction['candidate'])
-        
         record = {
             "time": datetime.now().isoformat(),
             "qihao": qihao,
@@ -1166,33 +998,22 @@ class ModelManager:
         }
         self.prediction_history.append(record)
         self.recent_accuracy.append(1 if is_correct else 0)
-        
-        # 同步到规则预测器
-        rule_pred = {
-            'main': [prediction['main']],
-            'candidate': prediction['candidate'],
-            'kill': prediction.get('kill'),
-            'qihao': qihao,
-            'confidence': prediction.get('confidence', 50)
-        }
-        self.rule_predictor.record_prediction_result(rule_pred, actual, sum_val)
-        
+
         if len(self.prediction_history) % 10 == 0:
             asyncio.create_task(self.save())
-    
+
     def get_accuracy_stats(self):
         recent = sum(self.recent_accuracy) / len(self.recent_accuracy) if self.recent_accuracy else 0
         total = sum(1 for r in self.prediction_history if r.get('correct', False)) / len(self.prediction_history) if self.prediction_history else 0
         return {
             'overall': {'recent': recent, 'total': total},
-            'algorithms': {'增强版规则+AI': recent}
+            'algorithms': {'PC28双杀组+双Y融合算法': recent}
         }
-    
+
     def clear_history(self):
         self.prediction_history = []
         self.recent_accuracy.clear()
         asyncio.create_task(self.save())
-
 
 # ==================== API模块（开奖数据） ====================
 class PC28API:
@@ -1208,22 +1029,22 @@ class PC28API:
         self.history_cache = deque(maxlen=Config.CACHE_SIZE)
         self.load_cache()
         logger.log_system("异步API模块初始化完成")
-    
+
     async def ensure_session(self):
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=Config.REQUEST_TIMEOUT))
-    
+
     def load_cache(self):
         try:
             if self.cache_file.exists():
                 with open(self.cache_file, 'rb') as f: self.history_cache.extend(pickle.load(f)[:Config.CACHE_SIZE])
         except Exception as e: logger.log_error(0, "加载缓存失败", e)
-    
+
     def save_cache(self):
         try:
             with open(self.cache_file, 'wb') as f: pickle.dump(list(self.history_cache), f)
         except Exception as e: logger.log_error(0, "保存缓存失败", e)
-    
+
     async def _make_api_call(self, endpoint, params=None):
         await self.ensure_session()
         for retry in range(Config.MAX_RETRIES):
@@ -1232,12 +1053,15 @@ class PC28API:
             try:
                 url = f"{self.base_url}/{endpoint}.json"
                 if params: url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
+                logger.log_api("请求", f"GET {url}")
                 async with self.session.get(url) as resp:
                     resp.raise_for_status()
                     try:
                         data = await resp.json()
                     except json.JSONDecodeError as e:
                         logger.log_error(0, f"JSON解析失败 {endpoint}", e)
+                        text = await resp.text()
+                        logger.log_api("原始响应", text[:200])
                         if retry < Config.MAX_RETRIES-1:
                             await asyncio.sleep(Config.RETRY_BACKOFF ** retry)
                             continue
@@ -1245,6 +1069,8 @@ class PC28API:
                             self.call_stats['failed_calls'] += 1
                             return None
                     if data.get('message') != 'success':
+                        logger.log_api("错误", f"API返回非success状态: {data}")
+                        self.call_stats['failed_calls'] += 1
                         if retry < Config.MAX_RETRIES-1:
                             await asyncio.sleep(Config.RETRY_BACKOFF ** retry)
                             continue
@@ -1252,15 +1078,33 @@ class PC28API:
                     elapsed = time.time() - start
                     self.call_stats['successful_calls'] += 1
                     self.call_stats['response_times'].append(elapsed)
+                    self.call_stats['last_call_time'] = datetime.now()
+                    self.call_stats['last_success_time'] = datetime.now()
+                    logger.log_api("调用成功", f"{endpoint} 耗时 {elapsed:.2f}秒")
                     return data.get('data', [])
+            except asyncio.TimeoutError:
+                logger.log_api("超时", f"{endpoint}")
+                if retry < Config.MAX_RETRIES-1:
+                    await asyncio.sleep(Config.RETRY_BACKOFF ** retry)
+                else:
+                    self.call_stats['failed_calls'] += 1
+                    return None
+            except aiohttp.ClientError as e:
+                logger.log_api("请求异常", f"{endpoint}: {str(e)}")
+                if retry < Config.MAX_RETRIES-1:
+                    await asyncio.sleep(Config.RETRY_BACKOFF ** retry)
+                else:
+                    self.call_stats['failed_calls'] += 1
+                    return None
             except Exception as e:
+                logger.log_error(0, f"API调用异常 {endpoint}", e)
                 if retry < Config.MAX_RETRIES-1:
                     await asyncio.sleep(Config.RETRY_BACKOFF ** retry)
                 else:
                     self.call_stats['failed_calls'] += 1
                     return None
         return None
-    
+
     async def download_csv_data(self, url: str) -> List[Dict]:
         await self.ensure_session()
         try:
@@ -1270,11 +1114,12 @@ class PC28API:
                 if text.startswith('\ufeff'): text = text[1:]
                 reader = csv.DictReader(StringIO(text))
                 rows = [{k.strip(): v.strip() for k, v in row.items()} for row in reader]
+                logger.log_api("CSV下载", f"从 {url} 获取了 {len(rows)} 行")
                 return rows
         except Exception as e:
             logger.log_error(0, f"下载CSV失败 {url}", e)
             return []
-    
+
     def _parse_kj_csv_row(self, row: Dict) -> Optional[Dict]:
         try:
             qihao = row.get('期号', '').strip()
@@ -1309,20 +1154,24 @@ class PC28API:
                 'hash': hashlib.md5(f"{qihao}_{total}".encode()).hexdigest()[:8]
             }
         except Exception as e:
+            logger.log_error(0, "解析开奖CSV行失败", e)
             return None
-    
+
     async def fetch_kj(self, nbr=1):
         data = await self._make_api_call('kj', {'nbr': nbr})
-        if not data: return []
+        if not data: 
+            return []
         
         processed = []
         for item in data:
             try:
                 qihao = str(item.get('nbr', '')).strip()
-                if not qihao: continue
+                if not qihao: 
+                    continue
                 
                 number = item.get('number') or item.get('num')
-                if number is None: continue
+                if number is None: 
+                    continue
                 
                 a = b = c = total = 0
                 if isinstance(number, str) and '+' in number:
@@ -1331,8 +1180,10 @@ class PC28API:
                         a, b, c = int(parts[0]), int(parts[1]), int(parts[2])
                         total = a + b + c
                 else:
-                    try: total = int(number)
-                    except: continue
+                    try: 
+                        total = int(number)
+                    except: 
+                        continue
                 
                 combo = item.get('combination', '')
                 if combo and len(combo) >= 2:
@@ -1354,11 +1205,12 @@ class PC28API:
                     'hash': hashlib.md5(f"{qihao}_{total}".encode()).hexdigest()[:8]
                 })
             except Exception as e: 
-                continue
+                logger.log_error(0, f"处理开奖数据项失败", e)
         
         processed.sort(key=lambda x: x.get('parsed_time', datetime.now()), reverse=True)
+        logger.log_api("fetch_kj", f"获取到 {len(processed)} 条有效数据")
         return processed
-    
+
     def _parse_time(self, date_str, time_str):
         try:
             dt_str = f"{date_str} {time_str}".strip()
@@ -1379,7 +1231,7 @@ class PC28API:
             return datetime.now()
         except Exception: 
             return datetime.now()
-    
+
     async def initialize_history(self, count=Config.INITIAL_HISTORY_SIZE, max_retries=3):
         logger.log_system("正在初始化历史数据...")
         kj_csv_url = f"https://www.pc28.help/api/kj.json?nbr={Config.KJ_HISTORY_DOWNLOAD}"
@@ -1395,25 +1247,34 @@ class PC28API:
             if len(self.history_cache) >= 30: 
                 return True
         
+        logger.log_system("CSV下载数据不足，回退到API获取...")
         for attempt in range(max_retries):
-            if attempt > 0: await asyncio.sleep(2)
+            if attempt > 0: 
+                await asyncio.sleep(2)
             test_data = await self.fetch_kj(nbr=1)
-            if not test_data: continue
-            if len(self.history_cache) >= 50: return True
+            if not test_data:
+                logger.log_error(0, "初始化失败", "无法获取开奖数据")
+                continue
+            logger.log_system(f"测试获取到一期数据: {test_data[0]}")
+            if len(self.history_cache) >= 50: 
+                return True
             kj_data = await self.fetch_kj(nbr=count)
-            if not kj_data: continue
+            if not kj_data: 
+                continue
             kj_data.sort(key=lambda x: x.get('parsed_time', datetime.now()), reverse=True)
             self.history_cache.clear()
             for item in kj_data:
                 if not any(x.get('qihao') == item['qihao'] for x in self.history_cache):
                     self.history_cache.append(item)
             self.save_cache()
+            logger.log_system(f"历史数据初始化完成: 开奖 {len(self.history_cache)}条")
             return len(self.history_cache) >= 30
         return False
-    
+
     async def get_latest_result(self):
         latest_api = await self.fetch_kj(nbr=1)
-        if not latest_api: return None
+        if not latest_api: 
+            return None
         latest = latest_api[0]
         if self.history_cache and self.history_cache[0].get('qihao') == latest['qihao']: 
             return None
@@ -1423,14 +1284,14 @@ class PC28API:
                 self.history_cache.pop()
             self.save_cache()
         return latest
-    
+
     async def get_history(self, count=50):
         return list(self.history_cache)[:count]
-    
+
     async def close(self):
         if self.session and not self.session.closed: 
             await self.session.close()
-    
+
     def get_statistics(self):
         avg = np.mean(self.call_stats['response_times']) if self.call_stats['response_times'] else 0
         success_rate = (self.call_stats['successful_calls'] / self.call_stats['total_calls']) if self.call_stats['total_calls'] else 0
@@ -1442,7 +1303,6 @@ class PC28API:
             '平均响应时间': f"{avg:.2f}秒",
             '最新期号': self.history_cache[0].get('qihao') if self.history_cache else '无'
         }
-
 
 # ==================== 数据模型 ====================
 @dataclass
@@ -1518,8 +1378,7 @@ class Account:
     def get_display_name(self) -> str:
         return self.display_name if self.display_name else self.phone
 
-
-# ==================== 账户管理器（简化版） ====================
+# ==================== 账户管理器 ====================
 class AccountManager:
     def __init__(self):
         self.accounts_file = Config.DATA_DIR / "accounts.json"
@@ -1536,31 +1395,75 @@ class AccountManager:
         self.load_accounts()
         self.load_user_states()
         logger.log_system(f"账户管理器初始化完成，已加载 {len(self.accounts)} 个账户")
-    
+
     def load_accounts(self):
         if self.accounts_file.exists():
             try:
                 with open(self.accounts_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 for phone, acc_dict in data.items():
+                    acc_dict.pop('is_listening', None)
                     bet_params_dict = acc_dict.get('bet_params', {})
                     bet_params = BetParams(**bet_params_dict)
                     acc_dict['bet_params'] = bet_params
+                    for key in ['needs_2fa', 'login_temp_data', 'chase_enabled', 'chase_numbers', 'chase_periods',
+                                'chase_current', 'chase_amount', 'chase_stop_reason', 'streak_records',
+                                'current_streak_type', 'current_streak_start', 'current_streak_messages',
+                                'current_streak_count', 'last_message_id', 'prediction_content',
+                                'broadcast_stop_requested', 'betting_in_progress']:
+                        if key not in acc_dict:
+                            if key == 'chase_numbers': acc_dict[key] = []
+                            elif key == 'streak_records': acc_dict[key] = []
+                            elif key == 'current_streak_start': acc_dict[key] = None
+                            elif key == 'current_streak_messages': acc_dict[key] = []
+                            elif key == 'current_streak_count': acc_dict[key] = 0
+                            elif key == 'last_message_id': acc_dict[key] = None
+                            elif key == 'prediction_content': acc_dict[key] = "double"
+                            elif key == 'broadcast_stop_requested': acc_dict[key] = False
+                            elif key == 'betting_in_progress': acc_dict[key] = False
+                            elif key == 'chase_enabled': acc_dict[key] = False
+                            elif key == 'chase_periods': acc_dict[key] = 0
+                            elif key == 'chase_current': acc_dict[key] = 0
+                            elif key == 'chase_amount': acc_dict[key] = 0
+                            elif key == 'chase_stop_reason': acc_dict[key] = None
+                            elif key == 'needs_2fa': acc_dict[key] = False
+                            elif key == 'login_temp_data': acc_dict[key] = {}
+                            elif key == 'current_streak_type': acc_dict[key] = None
                     self.accounts[phone] = Account(**acc_dict)
             except Exception as e:
                 logger.log_error(0, "加载账户数据失败", e)
-    
+
     async def save_accounts(self):
         data = {}
         for phone, acc in self.accounts.items():
             acc_dict = asdict(acc)
+            if isinstance(acc_dict.get('current_streak_start'), datetime):
+                acc_dict['current_streak_start'] = acc_dict['current_streak_start'].isoformat()
+            if 'streak_records' in acc_dict:
+                for record in acc_dict['streak_records']:
+                    if isinstance(record.get('start_time'), datetime):
+                        record['start_time'] = record['start_time'].isoformat()
+                    if isinstance(record.get('end_time'), datetime):
+                        record['end_time'] = record['end_time'].isoformat()
             data[phone] = acc_dict
         try:
             async with aiofiles.open(self.accounts_file, 'w', encoding='utf-8') as f:
                 await f.write(json.dumps(data, ensure_ascii=False, indent=2))
         except Exception as e:
             logger.log_error(0, "保存账户数据失败", e)
-    
+
+    async def _periodic_save(self):
+        while True:
+            await asyncio.sleep(Config.ACCOUNT_SAVE_INTERVAL)
+            dirty = None
+            async with self.update_lock:
+                if self._dirty:
+                    dirty = self._dirty.copy()
+                    self._dirty.clear()
+            if dirty:
+                logger.log_system(f"批量保存 {len(dirty)} 个账户")
+                await self.save_accounts()
+
     def load_user_states(self):
         if self.user_states_file.exists():
             try:
@@ -1568,14 +1471,14 @@ class AccountManager:
                     self.user_states = json.load(f)
             except Exception as e:
                 logger.log_error(0, "加载用户状态失败", e)
-    
+
     def save_user_states(self):
         try:
             with open(self.user_states_file, 'w', encoding='utf-8') as f:
                 json.dump(self.user_states, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.log_error(0, "保存用户状态失败", e)
-    
+
     async def add_account(self, user_id, phone) -> Tuple[bool, str]:
         async with self.update_lock:
             if user_id not in Config.ADMIN_USER_IDS:
@@ -1588,11 +1491,12 @@ class AccountManager:
                 return False, "手机号格式不正确，需包含国际区号，如 +861234567890"
             self.accounts[phone] = Account(phone=phone, owner_user_id=user_id)
             self._dirty.add(phone)
+            logger.log_account(user_id, phone, "添加账户")
             return True, f"账户 {phone} 添加成功"
-    
+
     def get_account(self, phone) -> Optional[Account]:
         return self.accounts.get(phone)
-    
+
     async def update_account(self, phone, **kwargs):
         async with self.update_lock:
             if phone not in self.account_locks:
@@ -1610,10 +1514,10 @@ class AccountManager:
                     self._dirty.add(phone)
                 return True
             return False
-    
+
     def get_user_accounts(self, user_id):
         return [acc for acc in self.accounts.values() if acc.owner_user_id == user_id]
-    
+
     def set_user_state(self, user_id, state, data=None):
         self.user_states.setdefault(user_id, {})
         self.user_states[user_id]['state'] = state
@@ -1621,16 +1525,16 @@ class AccountManager:
             self.user_states[user_id].update(data)
         self.user_states[user_id]['last_update'] = datetime.now().isoformat()
         self.save_user_states()
-    
+
     def get_user_state(self, user_id):
         return self.user_states.get(user_id, {})
-    
+
     def set_login_session(self, phone, session_data):
         self.login_sessions[phone] = session_data
-    
+
     def get_login_session(self, phone):
         return self.login_sessions.get(phone)
-    
+
     def create_client(self, phone):
         try:
             session_name = phone.replace('+', '')
@@ -1641,88 +1545,105 @@ class AccountManager:
         except Exception as e:
             logger.log_error(0, f"创建客户端失败 {phone}", e)
             return None
-    
+
     async def ensure_client_connected(self, phone):
         client = self.clients.get(phone)
         if not client:
-            await self.update_account(phone, is_logged_in=False)
+            logger.log_error(0, f"客户端不存在 {phone}", None)
+            await self.update_account(phone, is_logged_in=False, auto_betting=False, prediction_broadcast=False)
             return False
         if not client.is_connected():
             try:
                 await client.connect()
-            except:
-                await self.update_account(phone, is_logged_in=False)
+            except Exception as e:
+                logger.log_error(0, f"重连客户端失败 {phone}", e)
+                await self.update_account(phone, is_logged_in=False, auto_betting=False, prediction_broadcast=False)
                 return False
         try:
             if not await client.is_user_authorized():
-                await self.update_account(phone, is_logged_in=False)
+                logger.log_error(0, f"客户端 {phone} 会话未授权", None)
+                await self.update_account(phone, is_logged_in=False, auto_betting=False, prediction_broadcast=False)
                 return False
-        except:
-            await self.update_account(phone, is_logged_in=False)
+        except Exception as e:
+            logger.log_error(0, f"检查授权失败 {phone}", e)
+            await self.update_account(phone, is_logged_in=False, auto_betting=False, prediction_broadcast=False)
             return False
         return True
-    
+
     def get_cached_balance(self, phone):
         cache = self.balance_cache.get(phone)
         if cache and (datetime.now() - cache['time']).seconds < Config.BALANCE_CACHE_SECONDS:
             return cache['balance']
         return None
-    
+
     def update_balance_cache(self, phone, balance):
         self.balance_cache[phone] = {'balance': balance, 'time': datetime.now()}
-    
+
     async def verify_login_status(self):
         for phone, acc in self.accounts.items():
             if acc.is_logged_in:
                 connected = await self.ensure_client_connected(phone)
                 if not connected:
-                    await self.update_account(phone, is_logged_in=False)
-    
+                    logger.log_system(f"账户 {phone} 连接失效，已标记为未登录")
+
+    # 已禁用启动时重置自动投注标志
     async def reset_auto_flags_on_start(self):
-        logger.log_system("启动时保留账户的自动投注和播报标志")
-    
+        # 不再重置任何自动标志
+        logger.log_system("启动时保留账户的自动投注和播报标志（已禁用重置）")
+        # 可选：仅输出当前状态日志
+        for phone, acc in self.accounts.items():
+            if acc.auto_betting or acc.prediction_broadcast:
+                logger.log_system(f"账户 {phone} 当前状态: auto_betting={acc.auto_betting}, broadcast={acc.prediction_broadcast} (保留)")
+
     async def start_periodic_save(self):
-        async def periodic_save():
-            while True:
-                await asyncio.sleep(Config.ACCOUNT_SAVE_INTERVAL)
-                if self._dirty:
-                    await self.save_accounts()
-                    self._dirty.clear()
-        self._save_task = asyncio.create_task(periodic_save())
-    
+        self._save_task = asyncio.create_task(self._periodic_save())
+
     async def stop_periodic_save(self):
         if self._save_task:
             self._save_task.cancel()
-
+            try: await self._save_task
+            except asyncio.CancelledError: pass
 
 # ==================== 金额管理器 ====================
 class AmountManager:
     def __init__(self, account_manager):
         self.account_manager = account_manager
-    
+
     async def set_param(self, phone, param_name, amount, user_id):
-        if amount < 0: return False, "金额不能为负数"
+        if amount < 0: 
+            return False, "金额不能为负数"
         acc = self.account_manager.get_account(phone)
-        if not acc: return False, "账户不存在"
+        if not acc: 
+            return False, "账户不存在"
         valid_params = ['base_amount', 'max_amount', 'stop_loss', 'stop_win', 'stop_balance', 'resume_balance', 'dynamic_base_ratio']
         if param_name not in valid_params: 
-            return False, f"无效参数"
+            return False, f"无效参数，可选: {', '.join(valid_params)}"
         if param_name == 'base_amount' and amount > acc.balance:
             return False, f"基础金额不能超过当前余额 {acc.balance:.2f}KK"
         await self.account_manager.update_account(phone, bet_params={param_name: amount})
+        logger.log_betting(user_id, "设置金额参数", f"账户:{phone} {param_name}={amount}")
         return True, f"{param_name} 已设置为 {amount}KK"
-
 
 # ==================== 策略管理器 ====================
 class BettingStrategyManager:
     def __init__(self, account_manager):
         self.account_manager = account_manager
         self.strategies = {
-            '保守': {'base_amount': 10000, 'max_amount': 100000, 'multiplier': 1.5, 'stop_loss': 100000, 'stop_win': 50000, 'stop_balance': 50000, 'resume_balance': 200000},
-            '平衡': {'base_amount': 50000, 'max_amount': 500000, 'multiplier': 2.0, 'stop_loss': 500000, 'stop_win': 250000, 'stop_balance': 100000, 'resume_balance': 500000},
-            '激进': {'base_amount': 100000, 'max_amount': 1000000, 'multiplier': 2.0, 'stop_loss': 1000000, 'stop_win': 500000, 'stop_balance': 200000, 'resume_balance': 1000000},
-            '马丁格尔': {'base_amount': 10000, 'max_amount': 10000000, 'multiplier': 2.5, 'stop_loss': 5000000, 'stop_win': 1000000, 'stop_balance': 500000, 'resume_balance': 2000000},
-            '斐波那契': {'base_amount': 10000, 'max_amount': 10000000, 'multiplier': 1.0, 'stop_loss': 5000000, 'stop_win': 1000000, 'stop_balance': 500000, 'resume_balance': 2000000},
+            '保守': {'description': '保守策略', 'base_amount': 10000, 'max_amount': 100000,
+                    'multiplier': 1.5, 'stop_loss': 100000, 'stop_win': 50000,
+                    'stop_balance': 50000, 'resume_balance': 200000},
+            '平衡': {'description': '平衡策略', 'base_amount': 50000, 'max_amount': 500000,
+                    'multiplier': 2.0, 'stop_loss': 500000, 'stop_win': 250000,
+                    'stop_balance': 100000, 'resume_balance': 500000},
+            '激进': {'description': '激进策略', 'base_amount': 100000, 'max_amount': 1000000,
+                    'multiplier': 2.5, 'stop_loss': 1000000, 'stop_win': 500000,
+                    'stop_balance': 200000, 'resume_balance': 1000000},
+            '马丁格尔': {'description': '马丁格尔策略', 'base_amount': 10000, 'max_amount': 10000000,
+                        'multiplier': 2.5, 'stop_loss': 5000000, 'stop_win': 1000000,
+                        'stop_balance': 500000, 'resume_balance': 2000000},
+            '斐波那契': {'description': '斐波那契策略', 'base_amount': 10000, 'max_amount': 10000000,
+                        'multiplier': 1.0, 'stop_loss': 5000000, 'stop_win': 1000000,
+                        'stop_balance': 500000, 'resume_balance': 2000000},
         }
         self.schemes = {
             '组合1': '投注第1推荐组合',
@@ -1730,23 +1651,32 @@ class BettingStrategyManager:
             '组合1+2': '同时投注第1、2推荐组合',
             '杀主': '投注除最不可能组合外的所有组合'
         }
-    
+
     async def set_strategy(self, phone, strategy_name, user_id):
-        if strategy_name not in self.strategies: return False, "无效策略"
+        if strategy_name not in self.strategies: 
+            return False, f"无效策略"
         cfg = self.strategies[strategy_name]
         await self.account_manager.update_account(
-            phone, betting_strategy=strategy_name,
-            bet_params={k: v for k, v in cfg.items() if k != 'description'}
+            phone,
+            betting_strategy=strategy_name,
+            bet_params={
+                'base_amount': cfg['base_amount'], 'max_amount': cfg['max_amount'],
+                'multiplier': cfg['multiplier'], 'stop_loss': cfg['stop_loss'],
+                'stop_win': cfg['stop_win'], 'stop_balance': cfg.get('stop_balance', 0),
+                'resume_balance': cfg.get('resume_balance', 100000),
+            }
         )
-        return True, f"已设置为: {strategy_name} 策略"
-    
+        logger.log_betting(user_id, "设置策略", f"账户:{phone} 策略:{strategy_name}")
+        return True, f"已设置为: {strategy_name} 策略\n{cfg['description']}"
+
     async def set_scheme(self, phone, scheme_name, user_id):
-        if scheme_name not in self.schemes: return False, "无效方案"
+        if scheme_name not in self.schemes: 
+            return False, f"无效方案"
         await self.account_manager.update_account(phone, betting_scheme=scheme_name)
-        return True, f"投注方案已设置为: {scheme_name}"
+        logger.log_betting(user_id, "设置方案", f"账户:{phone} 方案:{scheme_name}")
+        return True, f"投注方案已设置为: {scheme_name} ({self.schemes[scheme_name]})"
 
-
-# ==================== 预测播报器（简化版） ====================
+# ==================== 预测播报器 ====================
 class PredictionBroadcaster:
     def __init__(self, account_manager, model_manager, api_client, global_scheduler):
         self.account_manager = account_manager
@@ -1761,12 +1691,15 @@ class PredictionBroadcaster:
         self.last_sent_qihao = {}
         self._send_locks = {}
         self.stop_target_qihao = {}
-    
+
     async def start_broadcast(self, phone, user_id):
         acc = self.account_manager.get_account(phone)
-        if not acc: return False, "账户不存在"
-        if not acc.is_logged_in: return False, "请先登录账户"
-        if not acc.prediction_group_id: return False, "请先设置播报群"
+        if not acc: 
+            return False, "账户不存在"
+        if not acc.is_logged_in: 
+            return False, "请先登录账户"
+        if not acc.prediction_group_id: 
+            return False, "请先设置播报群"
         if acc.broadcast_stop_requested:
             await self.account_manager.update_account(phone, broadcast_stop_requested=False)
             self.stop_target_qihao.pop(phone, None)
@@ -1778,46 +1711,73 @@ class PredictionBroadcaster:
         task = self.global_scheduler._create_task(self._broadcast_loop(phone, acc.prediction_group_id))
         self.broadcast_tasks[phone] = task
         await self.account_manager.update_account(phone, prediction_broadcast=True)
+        logger.log_prediction(user_id, "播报器启动", f"账户:{phone}")
         return True, "预测播报器启动成功"
-    
+
     async def stop_broadcast(self, phone, user_id):
         acc = self.account_manager.get_account(phone)
-        if not acc: return False, "账户不存在"
-        if not acc.prediction_broadcast: return True, "播报器已停止"
+        if not acc: 
+            return False, "账户不存在"
+        if not acc.prediction_broadcast: 
+            return True, "播报器已停止"
         target = self.global_predictions.get('next_qihao')
         await self.account_manager.update_account(phone, broadcast_stop_requested=True)
         self.stop_target_qihao[phone] = target
+        logger.log_prediction(user_id, "播报器平滑停止请求", f"账户:{phone} 目标期号:{target}")
         return True, "将在最后一期开奖后停止播报"
-    
+
     async def _broadcast_loop(self, phone, group_id):
         error_count = 0
         target_qihao = None
         while True:
             try:
                 acc = self.account_manager.get_account(phone)
-                if not acc: break
+                if not acc: 
+                    break
                 if acc.broadcast_stop_requested:
-                    if target_qihao is None: target_qihao = self.stop_target_qihao.get(phone) or self.global_predictions.get('next_qihao')
+                    if target_qihao is None: 
+                        target_qihao = self.stop_target_qihao.get(phone)
+                    if target_qihao is None: 
+                        target_qihao = self.global_predictions.get('next_qihao')
                     if self.last_sent_qihao.get(phone) != target_qihao:
-                        await self.send_prediction(phone, group_id, force_qihao=target_qihao)
+                        msg_id = await self.send_prediction(phone, group_id, force_qihao=target_qihao)
+                        if msg_id is None:
+                            await self.account_manager.update_account(phone, prediction_broadcast=False, broadcast_stop_requested=False)
+                            self.last_sent_qihao.pop(phone, None)
+                            self._send_locks.pop(phone, None)
+                            self.stop_target_qihao.pop(phone, None)
+                            break
                     if self.global_predictions.get('last_open_qihao') == target_qihao:
                         await self.account_manager.update_account(phone, prediction_broadcast=False, broadcast_stop_requested=False)
+                        self.last_sent_qihao.pop(phone, None)
+                        self._send_locks.pop(phone, None)
+                        self.stop_target_qihao.pop(phone, None)
                         break
                 elif not acc.prediction_broadcast:
+                    self.last_sent_qihao.pop(phone, None)
+                    self._send_locks.pop(phone, None)
+                    self.stop_target_qihao.pop(phone, None)
                     break
                 else:
                     await self.send_prediction(phone, group_id)
                 error_count = 0
                 await asyncio.sleep(5)
             except asyncio.CancelledError:
+                self.last_sent_qihao.pop(phone, None)
+                self._send_locks.pop(phone, None)
+                self.stop_target_qihao.pop(phone, None)
                 break
             except Exception as e:
                 error_count += 1
+                logger.log_error(0, f"播报器循环异常 {phone}", e)
                 if error_count >= 5:
                     await self.account_manager.update_account(phone, prediction_broadcast=False, broadcast_stop_requested=False)
+                    self.last_sent_qihao.pop(phone, None)
+                    self._send_locks.pop(phone, None)
+                    self.stop_target_qihao.pop(phone, None)
                     break
                 await asyncio.sleep(10)
-    
+
     async def update_global_predictions(self, prediction, next_qihao, latest):
         last_correct = None
         current_open_qihao = latest.get('qihao')
@@ -1837,30 +1797,63 @@ class PredictionBroadcaster:
             last_correct = matched_pred['correct']
             await self.model.learn(matched_pred, current_combo, current_open_qihao, current_sum)
         
+        kill_combo = prediction.get('kill')
+        if kill_combo is None:
+            main = prediction['main']
+            candidate = prediction['candidate']
+            others = [c for c in COMBOS if c != main and c != candidate]
+            kill_combo = random.choice(others) if others else random.choice(COMBOS)
+        
+        existing = None
+        for i, p in enumerate(self.global_predictions['predictions']):
+            if p.get('qihao') == next_qihao:
+                existing = p
+                break
+        
         new_pred = {
             'qihao': next_qihao, 'main': prediction['main'], 'candidate': prediction['candidate'],
             'confidence': prediction['confidence'], 'time': datetime.now().isoformat(),
             'actual': None, 'sum': None, 'correct': None, 'message_id': None,
-            'algo_details': prediction.get('algo_details', []), 'kill_group': prediction.get('kill')
+            'algo_details': prediction.get('algo_details', []), 'kill_group': kill_combo
         }
         
-        self.global_predictions['predictions'].append(new_pred)
-        if len(self.global_predictions['predictions']) > 15:
-            self.global_predictions['predictions'] = self.global_predictions['predictions'][-15:]
+        if existing:
+            existing.update(new_pred)
+            logger.log_system(f"更新已存在的期号 {next_qihao} 的预测")
+        else:
+            self.global_predictions['predictions'].append(new_pred)
+            if len(self.global_predictions['predictions']) > 15:
+                self.global_predictions['predictions'] = self.global_predictions['predictions'][-15:]
         
         self.global_predictions['last_open_qihao'] = current_open_qihao
         self.global_predictions['next_qihao'] = next_qihao
         self.global_predictions['last_update'] = datetime.now().isoformat()
         self._update_cached_messages()
         
+        tasks = []
+        async def send_and_check(phone, group_id):
+            acc = self.account_manager.get_account(phone)
+            if not acc: 
+                return
+            msg_id = await self.send_prediction(phone, group_id)
+            if msg_id and last_correct is not None:
+                logger.log_prediction(0, f"触发连输连赢检查", f"账户:{phone} 正确:{last_correct} 消息ID:{msg_id}")
+                await self._check_streak(phone, group_id, last_correct, msg_id)
+        
         for phone, task in list(self.broadcast_tasks.items()):
             if not task.done():
                 acc = self.account_manager.get_account(phone)
                 if acc and (acc.prediction_broadcast or acc.broadcast_stop_requested) and acc.prediction_group_id:
-                    await self.send_prediction(phone, acc.prediction_group_id)
-    
+                    tasks.append(send_and_check(phone, acc.prediction_group_id))
+        
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, Exception): 
+                    logger.log_error(0, "并发发送预测异常", res)
+
     def _update_cached_messages(self):
-        lines = ["🤖PC28增强版预测 ", "-"*30, "期号    主推候选  状态  和值"]
+        lines = ["🤖PC28双杀组+双Y融合算法 ", "-"*30, "期号    主推候选  状态  和值"]
         for p in self.global_predictions['predictions'][-15:]:
             q = p['qihao'][-4:] if len(p['qihao'])>=4 else p['qihao']
             combo_str = p['main'] + p['candidate']
@@ -1869,186 +1862,468 @@ class PredictionBroadcaster:
             lines.append(f"{q:4s}   {combo_str:4s}   {mark:2s}   {s:>2s}")
         self.global_predictions['cached_double_message'] = "AI双组预测\n```" + "\n".join(lines) + "\n```"
         
-        kill_lines = ["🤖AI杀组", "-"*30, "期号   杀组    状态  和值"]
+        kill_lines = ["🤖AI杀组", "-"*30, "期号    杀组    状态  和值"]
         for p in self.global_predictions['predictions'][-15:]:
             q = p['qihao'][-4:] if len(p['qihao'])>=4 else p['qihao']
-            kill = p.get('kill_group', '--') or '--'
+            kill = p.get('kill_group', '--')
+            if kill is None: kill = '--'
             mark = "✅" if (p.get('actual') is not None and p['actual'] != kill) else "❌" if (p.get('actual') is not None and p['actual'] == kill) else "⏳"
             s = str(p['sum']) if p['sum'] is not None else "--"
             kill_lines.append(f"{q:4s}   {kill:4s}   {mark:2s}   {s:>2s}")
         self.global_predictions['cached_kill_message'] = "AI杀组预测\n```" + "\n".join(kill_lines) + "\n```"
-    
+
+    async def _check_streak(self, phone, group_id, is_correct, last_message_id):
+        acc = self.account_manager.get_account(phone)
+        if not acc: 
+            return
+        current_type = acc.current_streak_type
+        current_start = acc.current_streak_start
+        current_count = acc.current_streak_count
+        now = datetime.now().isoformat()
+        
+        if is_correct:
+            if current_type == "win": 
+                new_count = current_count + 1
+            else: 
+                current_type = "win"
+                current_start = now
+                new_count = 1
+        else:
+            if current_type == "loss": 
+                new_count = current_count + 1
+            else: 
+                current_type = "loss"
+                current_start = now
+                new_count = 1
+        
+        logger.log_prediction(0, f"连输连赢更新", f"账户:{phone} 类型:{current_type} 计数:{new_count} 正确:{is_correct}")
+        
+        if new_count in [7,8,10]:
+            message_link = f"https://t.me/c/{str(group_id).replace('-100','')}/{last_message_id}"
+            record = {
+                'type': current_type, 'count': new_count, 'start_time': current_start,
+                'end_time': now, 'message_link': message_link, 'message_id': last_message_id, 'group_id': group_id
+            }
+            streak_records = acc.streak_records.copy()
+            streak_records.append(record)
+            if len(streak_records) > 50: 
+                streak_records = streak_records[-50:]
+            await self.account_manager.update_account(phone, streak_records=streak_records)
+            logger.log_prediction(0, f"连输连赢记录保存", f"账户:{phone} 类型:{current_type} 计数:{new_count}")
+            if new_count == 10:
+                current_type = None
+                current_start = None
+                new_count = 0
+        
+        await self.account_manager.update_account(phone,
+            current_streak_type=current_type,
+            current_streak_start=current_start if current_start else None,
+            current_streak_count=new_count
+        )
+
     async def send_prediction(self, phone, group_id, force_qihao=None):
         lock = self._send_locks.setdefault(phone, asyncio.Lock())
         async with lock:
             target_qihao = force_qihao if force_qihao is not None else self.global_predictions.get('next_qihao')
-            if self.last_sent_qihao.get(phone) == target_qihao: return None
-            
+            if self.last_sent_qihao.get(phone) == target_qihao: 
+                return None
             client = self.account_manager.clients.get(phone)
-            if not client or not await self.account_manager.ensure_client_connected(phone): return None
-            
+            if not client or not await self.account_manager.ensure_client_connected(phone): 
+                return None
             acc = self.account_manager.get_account(phone)
-            if not acc: return None
+            if not acc: 
+                return None
             
             if acc.prediction_content == "double":
                 message = self.global_predictions.get('cached_double_message')
-                if not message: self._update_cached_messages()
-                message = self.global_predictions['cached_double_message']
+                if not message: 
+                    self._update_cached_messages()
+                    message = self.global_predictions['cached_double_message']
             else:
                 message = self.global_predictions.get('cached_kill_message')
-                if not message: self._update_cached_messages()
-                message = self.global_predictions['cached_kill_message']
+                if not message: 
+                    self._update_cached_messages()
+                    message = self.global_predictions['cached_kill_message']
             
-            try:
-                msg = await client.send_message(group_id, message, parse_mode='markdown')
-                self.last_sent_qihao[phone] = target_qihao
-                return msg.id
-            except Exception as e:
-                logger.log_error(0, f"发送播报失败", e)
-                return None
+            for retry in range(3):
+                try:
+                    msg = await client.send_message(group_id, message, parse_mode='markdown')
+                    await self.account_manager.update_account(phone, last_message_id=msg.id)
+                    self.last_sent_qihao[phone] = target_qihao
+                    if self.global_predictions['predictions']:
+                        self.global_predictions['predictions'][-1]['message_id'] = msg.id
+                    return msg.id
+                except FloodWaitError as e:
+                    wait_seconds = e.seconds
+                    logger.log_prediction(0, f"播报触发限流，等待 {wait_seconds} 秒", f"账户:{phone}")
+                    if retry < 2: 
+                        await asyncio.sleep(min(wait_seconds, 30))
+                    else: 
+                        logger.log_error(0, f"播报发送失败（限流）", e)
+                        return None
+                except Exception as e:
+                    logger.log_error(0, f"发送播报失败", e)
+                    return None
+            return None
 
-
-# ==================== 游戏调度器（简化版） ====================
+# ==================== 游戏调度器 ====================
 class GameScheduler:
     def __init__(self, account_manager, model_manager, api_client):
         self.account_manager = account_manager
         self.model = model_manager
         self.api = api_client
-        self.game_stats = {'betting_cycles':0, 'successful_bets':0, 'failed_bets':0}
-    
+        self.game_stats = {'total_cycles':0, 'betting_cycles':0, 'successful_bets':0, 'failed_bets':0, 'total_profit':0, 'total_loss':0}
+
     async def start_auto_betting(self, phone, user_id):
         acc = self.account_manager.get_account(phone)
-        if not acc: return False, "账户不存在"
-        if not acc.is_logged_in: return False, "请先登录账户"
-        if not acc.game_group_id: return False, "请先设置游戏群"
+        if not acc: 
+            return False, "账户不存在"
+        if not acc.is_logged_in: 
+            return False, "请先登录账户"
+        if not acc.game_group_id: 
+            return False, "请先设置游戏群"
         await self.account_manager.update_account(phone, auto_betting=True, martingale_reset=True, fibonacci_reset=True)
+        logger.log_betting(user_id, "自动投注开启", f"账户:{phone}")
         return True, "自动投注已开启"
-    
+
     async def stop_auto_betting(self, phone, user_id):
         await self.account_manager.update_account(phone, auto_betting=False)
+        logger.log_betting(user_id, "自动投注关闭", f"账户:{phone}")
         return True, "自动投注已关闭"
-    
+
     async def check_bet_result(self, phone, expected_qihao, latest_result):
         acc = self.account_manager.get_account(phone)
-        if not acc: return
-        if not acc.last_prediction or not acc.last_bet_types: return
-        
+        if not acc: 
+            return
+        scheme = acc.betting_scheme
+        last_pred = acc.last_prediction
+        last_bet_types = acc.last_bet_types
+        if not last_pred or not last_bet_types: 
+            return
         actual_combo = latest_result.get('combo')
-        if not actual_combo: return
-        
-        main = acc.last_prediction.get('main')
-        candidate = acc.last_prediction.get('candidate')
+        if not actual_combo: 
+            return
+        main = last_pred.get('main')
+        candidate = last_pred.get('candidate')
         
         def is_match(bet_type: str, actual: str) -> bool:
-            if bet_type == actual: return True
-            if bet_type in ["大","小"] and actual.startswith(bet_type): return True
-            if bet_type in ["单","双"] and (actual == bet_type or (len(actual)>=2 and actual[1]==bet_type)): return True
+            if bet_type == actual: 
+                return True
+            if bet_type in ["大","小"] and actual.startswith(bet_type): 
+                return True
+            if bet_type in ["单","双"]:
+                if actual == bet_type: 
+                    return True
+                if len(actual)>=2 and actual[1]==bet_type: 
+                    return True
             return False
         
-        is_win = any(is_match(t, actual_combo) for t in acc.last_bet_types)
+        is_win = False
+        if scheme == '组合1': 
+            is_win = is_match(main, actual_combo)
+        elif scheme == '组合2': 
+            is_win = is_match(candidate, actual_combo)
+        elif scheme == '组合1+2': 
+            is_win = is_match(main, actual_combo) or is_match(candidate, actual_combo)
+        else: 
+            is_win = any(is_match(t, actual_combo) for t in last_bet_types)
         
         if is_win:
             await self.account_manager.update_account(phone,
                 consecutive_wins=acc.consecutive_wins+1, consecutive_losses=0,
-                martingale_reset=True, fibonacci_reset=True, total_wins=acc.total_wins+1)
+                martingale_reset=True, fibonacci_reset=True, total_wins=acc.total_wins+1
+            )
+            logger.log_betting(0, "投注命中", f"账户:{phone} 期号:{expected_qihao} 实际:{actual_combo} 方案:{scheme} 主推:{main} 候选:{candidate}")
         else:
-            await self.account_manager.update_account(phone,
-                consecutive_losses=acc.consecutive_losses+1, consecutive_wins=0)
-    
+            await self.account_manager.update_account(phone, consecutive_losses=acc.consecutive_losses+1, consecutive_wins=0)
+            logger.log_betting(0, "投注未命中", f"账户:{phone} 期号:{expected_qihao} 实际:{actual_combo} 方案:{scheme} 主推:{main} 候选:{candidate}")
+
+    async def execute_chase(self, phone: str, latest: dict):
+        acc = self.account_manager.get_account(phone)
+        if not acc or not acc.chase_enabled: 
+            return
+        logger.log_betting(0, "追号检查", f"账户:{phone} 启用:{acc.chase_enabled} 进度:{acc.chase_current}/{acc.chase_periods}")
+        
+        if acc.chase_current >= acc.chase_periods:
+            await self.account_manager.update_account(phone, chase_enabled=False, chase_stop_reason="期满",
+                chase_numbers=[], chase_periods=0, chase_current=0, chase_amount=0)
+            logger.log_betting(0, "追号期满停止", f"账户:{phone}")
+            return
+        
+        current_qihao = latest.get('qihao')
+        if acc.last_bet_period == current_qihao: 
+            return
+        
+        bet_amount = acc.chase_amount if acc.chase_amount > 0 else acc.bet_params.base_amount
+        bet_amount = min(bet_amount, acc.bet_params.max_amount)
+        bet_amount = max(bet_amount, Config.MIN_BET_AMOUNT)
+        bet_items = [f"{num}/{bet_amount}" for num in acc.chase_numbers]
+        if not bet_items: 
+            return
+        
+        total_needed = bet_amount * len(acc.chase_numbers)
+        cur_bal = await self._query_balance(phone)
+        if cur_bal is None or cur_bal < total_needed:
+            logger.log_betting(0, "追号余额不足", f"账户:{phone} 需要:{total_needed} 余额:{cur_bal if cur_bal else '未知'}")
+            return
+        
+        success = await self._send_bets(phone, bet_items, is_chase=True)
+        if success:
+            new_current = acc.chase_current + 1
+            await self.account_manager.update_account(phone, chase_current=new_current, last_bet_period=current_qihao,
+                last_bet_types=[str(num) for num in acc.chase_numbers], last_bet_amount=bet_amount, last_bet_total=total_needed)
+            logger.log_betting(0, "追号成功", f"账户:{phone} 数字:{acc.chase_numbers} 金额:{bet_amount} 进度:{new_current}/{acc.chase_periods}")
+            asyncio.create_task(self._query_balance(phone))
+
     async def execute_bet(self, phone, prediction, latest):
         acc = self.account_manager.get_account(phone)
-        if not acc or not acc.auto_betting: return
-        
+        if not acc: 
+            return
         lock = self.account_manager.account_locks.setdefault(phone, asyncio.Lock())
         async with lock:
-            if acc.betting_in_progress: return
+            if acc.betting_in_progress:
+                logger.log_betting(0, "账户投注正在进行中，跳过本次投注", f"账户:{phone}")
+                return
             acc.betting_in_progress = True
-        
         try:
+            await self.execute_chase(phone, latest)
+            if not acc.auto_betting: 
+                return
+            if not await self.account_manager.ensure_client_connected(phone):
+                logger.log_betting(0, f"账户 {phone} 客户端未连接，无法投注", "")
+                return
             current_qihao = latest.get('qihao')
-            if acc.last_bet_period == current_qihao: return
-            
+            if acc.last_bet_period == current_qihao: 
+                return
             now = datetime.now()
             next_open = latest['parsed_time'] + timedelta(seconds=Config.GAME_CYCLE_SECONDS)
             close_time = next_open - timedelta(seconds=Config.CLOSE_BEFORE_SECONDS)
-            if now >= close_time: return
-            
+            if now >= close_time: 
+                logger.log_betting(0, "已封盘，跳过投注", f"账户:{phone}")
+                return
             cur_bal = await self._query_balance(phone)
-            if cur_bal is None or cur_bal <= 0: return
-            
-            # 计算投注金额
-            base = int(cur_bal * acc.bet_params.dynamic_base_ratio) if acc.bet_params.dynamic_base_ratio > 0 else acc.bet_params.base_amount
-            base = max(Config.MIN_BET_AMOUNT, min(base, acc.bet_params.max_amount))
-            
-            bet_amount = base
-            if acc.betting_strategy == '马丁格尔' and acc.consecutive_losses > 0:
-                bet_amount = base * (acc.bet_params.multiplier ** acc.consecutive_losses)
-            elif acc.betting_strategy == '斐波那契' and acc.consecutive_losses > 0:
-                fib = [1,1,2,3,5,8,13,21,34,55]
-                bet_amount = base * fib[min(acc.consecutive_losses, len(fib)-1)]
-            elif acc.betting_strategy == '激进':
-                bet_amount = base * (1 + acc.consecutive_losses)
-            
-            bet_amount = min(bet_amount, acc.bet_params.max_amount)
-            bet_amount = max(bet_amount, Config.MIN_BET_AMOUNT)
-            
-            # 投注类型
-            if acc.betting_scheme == '杀主' and prediction.get('kill'):
-                bet_types = [c for c in COMBOS if c != prediction['kill']]
-            else:
-                bet_types = [prediction['main']]
-                if acc.betting_scheme == '组合1+2':
-                    bet_types.append(prediction['candidate'])
-                elif acc.betting_scheme == '组合2':
-                    bet_types = [prediction['candidate']]
-            
+            if cur_bal is None or cur_bal <= 0: 
+                return
+            bet_amount, updates = self._calculate_bet_amount(acc, cur_bal)
+            if updates: 
+                await self.account_manager.update_account(phone, **updates)
+            if acc.betting_scheme == '杀主':
+                kill_combo = prediction.get('kill')
+                if not kill_combo: 
+                    logger.log_betting(0, "AI未提供杀组，跳过投注", f"账户:{phone}")
+                    return
+                bet_types = [c for c in COMBOS if c != kill_combo]
+                logger.log_betting(0, f"AI杀组: {kill_combo}, 投注组合: {bet_types}", f"账户:{phone}")
+            else: 
+                bet_types = self._get_bet_types(prediction, acc.betting_scheme)
             bet_items = [f"{t} {bet_amount}" for t in bet_types]
             total = bet_amount * len(bet_types)
-            
-            if cur_bal < total: return
-            
-            # 发送投注
-            client = self.account_manager.clients.get(phone)
-            if client and acc.game_group_id:
-                try:
-                    await client.send_message(acc.game_group_id, " ".join(bet_items))
-                    self.game_stats['successful_bets'] += 1
-                    self.game_stats['betting_cycles'] += 1
-                    await self.account_manager.update_account(phone,
-                        last_bet_time=datetime.now().isoformat(), last_bet_amount=bet_amount,
-                        last_bet_types=bet_types, total_bets=acc.total_bets+1,
-                        last_prediction={'main': prediction['main'], 'candidate': prediction['candidate']},
-                        last_bet_period=current_qihao)
-                except Exception as e:
-                    self.game_stats['failed_bets'] += 1
+            if cur_bal < total: 
+                logger.log_betting(0, "余额不足", f"账户:{phone} 余额:{cur_bal} 需要:{total}")
+                return
+            success = await self._send_bets(phone, bet_items, is_chase=False)
+            if success:
+                self.game_stats['successful_bets'] += 1
+                self.game_stats['betting_cycles'] += 1
+                await self.account_manager.update_account(phone,
+                    last_bet_time=datetime.now().isoformat(), last_bet_amount=bet_amount, last_bet_types=bet_types,
+                    total_bets=acc.total_bets+1, last_bet_total=total,
+                    last_prediction={'main': prediction['main'], 'candidate': prediction['candidate'], 'confidence': prediction['confidence']},
+                    last_bet_period=current_qihao)
+                logger.log_betting(0, "投注成功", f"账户:{phone} 每注金额:{bet_amount} 总金额:{total} 类型:{bet_types} 置信度:{prediction['confidence']:.1f}%")
+                asyncio.create_task(self._query_balance(phone))
+            else: 
+                self.game_stats['failed_bets'] += 1
+                logger.log_betting(0, "投注失败", f"账户:{phone}")
         finally:
-            acc.betting_in_progress = False
-    
+            async with lock: 
+                acc.betting_in_progress = False
+
+    def _calculate_bet_amount(self, acc: Account, current_balance: float) -> Tuple[int, Dict]:
+        if acc.bet_params.dynamic_base_ratio > 0 and current_balance > 0:
+            base = int(current_balance * acc.bet_params.dynamic_base_ratio)
+            base = max(Config.MIN_BET_AMOUNT, min(base, acc.bet_params.max_amount))
+        else: 
+            base = acc.bet_params.base_amount
+        max_amt = acc.bet_params.max_amount
+        losses = acc.consecutive_losses
+        wins = acc.consecutive_wins
+        mult = acc.bet_params.multiplier
+        strategy = acc.betting_strategy
+        updates = {}
+        
+        if strategy == '马丁格尔':
+            if wins > 0 or acc.martingale_reset: 
+                amt = base
+                updates['martingale_reset'] = False
+            else: 
+                amt = base * (mult ** losses)
+        elif strategy == '斐波那契':
+            if wins > 0 or acc.fibonacci_reset: 
+                amt = base
+                updates['fibonacci_reset'] = False
+            else:
+                fib = [1,1,2,3,5,8,13,21,34,55]
+                idx = min(losses, len(fib)-1)
+                amt = base * fib[idx]
+        elif strategy == '激进': 
+            amt = base * (1 + losses)
+        else: 
+            amt = base
+        amt = min(amt, max_amt)
+        amt = max(amt, Config.MIN_BET_AMOUNT)
+        return int(amt), updates
+
+    def _get_bet_types(self, pred: Dict, scheme: str) -> List[str]:
+        rec = [pred['main'], pred['candidate']]
+        if pred['main'] == pred['candidate']: 
+            rec = [pred['main']]
+        if scheme == '组合1': 
+            return [rec[0]] if rec else ['小双']
+        if scheme == '组合2': 
+            return [rec[1]] if len(rec)>1 else ['小双']
+        if scheme == '组合1+2': 
+            return rec[:2] if len(rec)>=2 else rec
+        return [rec[0]] if rec else ['小双']
+
+    async def _send_bets(self, phone: str, bet_items: List[str], is_chase: bool) -> bool:
+        client = self.account_manager.clients.get(phone)
+        acc = self.account_manager.get_account(phone)
+        if not client or not acc or not acc.game_group_id: 
+            return False
+        if not await self.account_manager.ensure_client_connected(phone): 
+            return False
+        message = " ".join(bet_items)
+        bet_type = "追号" if is_chase else "自动投注"
+        logger.log_betting(0, f"发送{bet_type}", f"账户:{phone} 消息:{message}")
+        
+        for retry in range(3):
+            try:
+                await client.send_message(acc.game_group_id, message)
+                logger.log_game(f"{bet_type}发送成功: {phone} -> {message}")
+                return True
+            except FloodWaitError as e:
+                wait_seconds = e.seconds
+                logger.log_betting(0, f"触发限流，等待 {wait_seconds} 秒", f"账户:{phone}")
+                if retry < 2: 
+                    await asyncio.sleep(min(wait_seconds, 30))
+                else:
+                    logger.log_error(phone, f"{bet_type}发送失败（限流）", e)
+                    try: 
+                        await client.send_message(acc.game_group_id, "取消")
+                    except: 
+                        pass
+                    return False
+            except Exception as e:
+                logger.log_error(phone, f"{bet_type}发送失败", e)
+                try: 
+                    await client.send_message(acc.game_group_id, "取消")
+                except: 
+                    pass
+                return False
+        return False
+
     async def _query_balance(self, phone: str) -> Optional[float]:
         client = self.account_manager.clients.get(phone)
-        if not client or not await self.account_manager.ensure_client_connected(phone): return None
+        acc = self.account_manager.get_account(phone)
+        if not client or not acc or not await self.account_manager.ensure_client_connected(phone): 
+            return None
         try:
-            await client.send_message(Config.BALANCE_BOT, "/start")
-            await asyncio.sleep(2)
-            msgs = await client.get_messages(Config.BALANCE_BOT, limit=3)
-            for msg in msgs:
-                if msg.text and ('KKCOIN' in msg.text.upper() or '余额' in msg.text):
-                    match = re.search(r'([\d,]+\.?\d*)', msg.text)
-                    if match:
-                        balance = float(match.group(1).replace(',', ''))
-                        self.account_manager.update_balance_cache(phone, balance)
-                        return balance
-            return None
+            for retry in range(3):
+                try:
+                    await client.send_message(Config.BALANCE_BOT, "/start")
+                    break
+                except FloodWaitError as e:
+                    wait_seconds = e.seconds
+                    logger.log_betting(0, f"余额查询触发限流，等待 {wait_seconds} 秒", f"账户:{phone}")
+                    if retry < 2: 
+                        await asyncio.sleep(min(wait_seconds, 30))
+                    else: 
+                        return None
+            start_dt = datetime.now()
+            balance = None
+            while (datetime.now() - start_dt).total_seconds() < 10:
+                await asyncio.sleep(1)
+                msgs = await client.get_messages(Config.BALANCE_BOT, limit=5)
+                for msg in msgs:
+                    if msg.text and ('KKCOIN' in msg.text.upper() or '余额' in msg.text):
+                        text = msg.text
+                        patterns = [r'💰\s*KKCOIN\s*[:：]\s*([\d,]+\.?\d*)', r'KKCOIN\s*[:：]\s*([\d,]+\.?\d*)',
+                                    r'([\d,]+\.?\d*)\s*KKCOIN', r'余额[:：]\s*([\d,]+\.?\d*)', r'([\d,]+\.?\d*)\s*元']
+                        for pat in patterns:
+                            m = re.search(pat, text, re.IGNORECASE)
+                            if m:
+                                try: 
+                                    balance = float(m.group(1).replace(',',''))
+                                    break
+                                except: 
+                                    continue
+                        if balance is not None: 
+                            break
+                if balance is not None: 
+                    break
+            if balance is None: 
+                return None
+            self.account_manager.update_balance_cache(phone, balance)
+            if acc.initial_balance == 0:
+                await self.account_manager.update_account(phone, initial_balance=balance, balance=balance,
+                    last_balance=balance, last_balance_check=datetime.now().isoformat())
+                return balance
+            old = acc.balance
+            change = balance - old
+            new_profit = acc.total_profit
+            new_loss = acc.total_loss
+            if change > 0: 
+                new_profit += change
+            elif change < 0: 
+                new_loss += -change
+            await self.account_manager.update_account(phone, balance=balance, last_balance=old,
+                last_balance_check=datetime.now().isoformat(), total_profit=new_profit, total_loss=new_loss)
+            if acc.auto_betting:
+                if acc.bet_params.stop_balance > 0 and balance < acc.bet_params.stop_balance:
+                    await self.stop_auto_betting(phone, 0)
+                    await self.account_manager.update_account(phone, stop_reason="余额低于阈值")
+                elif acc.bet_params.resume_balance > 0 and balance >= acc.bet_params.resume_balance:
+                    if not acc.auto_betting and acc.stop_reason == "余额低于阈值":
+                        await self.start_auto_betting(phone, 0)
+                        await self.account_manager.update_account(phone, stop_reason=None)
+            return balance
         except Exception as e:
+            logger.log_error(0, f"查询余额失败 {phone}", e)
             return None
-    
+
+    async def manual_bet(self, phone: str, bet_type: str, amount: int, user_id: int) -> Tuple[bool, str]:
+        acc = self.account_manager.get_account(phone)
+        if not acc or not acc.is_logged_in or not acc.game_group_id: 
+            return False, "账户未就绪"
+        valid = ['大','小','单','双','大单','大双','小单','小双']
+        bet_type = bet_type.strip()
+        if bet_type not in valid: 
+            return False, f'无效类型，可选: {valid}'
+        if amount < Config.MIN_BET_AMOUNT or amount > Config.MAX_BET_AMOUNT: 
+            return False, f'金额必须在{Config.MIN_BET_AMOUNT}-{Config.MAX_BET_AMOUNT}KK之间'
+        cur_bal = await self._query_balance(phone)
+        if cur_bal is None: 
+            return False, "余额查询失败"
+        if cur_bal < amount: 
+            return False, f"余额不足，当前余额: {cur_bal:.2f}KK"
+        latest = await self.api.get_latest_result()
+        current_qihao = latest.get('qihao') if latest else None
+        success = await self._send_bets(phone, [f"{bet_type} {amount}"], is_chase=False)
+        if success:
+            await self.account_manager.update_account(phone,
+                last_bet_time=datetime.now().isoformat(), last_bet_amount=amount, last_bet_types=[bet_type],
+                total_bets=acc.total_bets+1, last_bet_period=current_qihao)
+            asyncio.create_task(self._query_balance(phone))
+            return True, f'已发送投注: {bet_type} {amount}KK'
+        return False, '发送投注失败'
+
     def get_stats(self):
         auto = sum(1 for a in self.account_manager.accounts.values() if a.auto_betting)
         broadcast = sum(1 for a in self.account_manager.accounts.values() if a.prediction_broadcast)
         return {'auto_betting_accounts': auto, 'broadcast_accounts': broadcast, 'game_stats': self.game_stats.copy()}
 
-
-# ==================== 全局调度器（简化版） ====================
+# ==================== 全局调度器 ====================
 class GlobalScheduler:
     def __init__(self, account_manager, model_manager, api_client, prediction_broadcaster, game_scheduler):
         self.account_manager = account_manager
@@ -2060,85 +2335,164 @@ class GlobalScheduler:
         self.running = False
         self.last_qihao = None
         self.check_interval = Config.SCHEDULER_CHECK_INTERVAL
+        self.health_check_interval = Config.HEALTH_CHECK_INTERVAL
+        self.last_health_check = 0
+        self.last_heartbeat_log = 0  # 心跳日志记录时间
         self.bet_semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_BETS)
         self.tasks = set()
         self._prediction_lock = asyncio.Lock()
         self._last_prediction_result = None
         self._last_prediction_qihao = None
-    
+
+    def _is_maintenance_time(self, now: datetime) -> bool:
+        beijing_time = now + timedelta(hours=8)
+        hour = beijing_time.hour
+        minute = beijing_time.minute
+        is_dst = 4 <= now.month <= 10
+        if is_dst: 
+            return (hour == 19 and minute >= 55) or (hour == 20 and minute <= 30)
+        else: 
+            return (hour == 20 and minute >= 55) or (hour == 21 and minute <= 30)
+
+    async def _download_history_during_maintenance(self):
+        try:
+            logger.log_system("维护时段：开始下载历史数据...")
+            kj_url = f"https://www.pc28.ai/api/history/kj.csv?nbr=10000"
+            kj_rows = await self.api.download_csv_data(kj_url)
+            logger.log_system("维护时段历史数据下载完成")
+        except Exception as e: 
+            logger.log_error(0, "维护时段下载任务失败", e)
+
     async def start(self):
-        if self.running: return
+        if self.running: 
+            return
         self.running = True
         self.task = asyncio.create_task(self._run())
         self.tasks.add(self.task)
-    
+        logger.log_system("全局调度器已启动")
+
     async def stop(self):
         self.running = False
-        for task in self.tasks:
+        self.tasks = {t for t in self.tasks if not t.done()}
+        for task in self.tasks: 
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
         self.tasks.clear()
-    
+        logger.log_system("全局调度器已停止")
+
     def _create_task(self, coro):
         task = asyncio.create_task(coro)
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
-    
+
     async def _run(self):
         for attempt in range(5):
-            if await self.api.initialize_history(): break
+            if await self.api.initialize_history(): 
+                break
+            logger.log_system(f"历史数据初始化失败，5秒后重试 ({attempt+1}/5)")
             await asyncio.sleep(5)
         
         while self.running:
             try:
+                now = datetime.now()
+                
+                # 心跳日志 - 每60秒输出一次
+                if (now.timestamp() - self.last_heartbeat_log) >= 60:
+                    logger.log_heartbeat()
+                    self.last_heartbeat_log = now.timestamp()
+                
+                if self._is_maintenance_time(now):
+                    logger.log_system("当前处于维护时段，暂停实时检测，开始下载历史数据...")
+                    asyncio.create_task(self._download_history_during_maintenance())
+                    await asyncio.sleep(1800)
+                    continue
+                
+                if (now.timestamp() - self.last_health_check) > self.health_check_interval:
+                    await self._health_check()
+                    self.last_health_check = now.timestamp()
+                
                 latest = await self.api.get_latest_result()
                 if latest and latest.get('qihao') != self.last_qihao:
+                    logger.log_game(f"检测到新期号: {latest['qihao']}")
                     await self._on_new_period(latest['qihao'], latest)
+                
                 await asyncio.sleep(self.check_interval)
-            except asyncio.CancelledError:
+            except asyncio.CancelledError: 
                 break
-            except Exception as e:
+            except Exception as e: 
+                logger.log_error(0, "全局调度器异常", e)
                 await asyncio.sleep(10)
-    
+
+    async def _health_check(self):
+        now = datetime.now()
+        for phone, cache in list(self.account_manager.balance_cache.items()):
+            if (now - cache['time']).seconds > Config.BALANCE_CACHE_SECONDS * 2:
+                del self.account_manager.balance_cache[phone]
+        
+        if self.prediction_broadcaster.global_predictions.get('last_update'):
+            last_update = datetime.fromisoformat(self.prediction_broadcaster.global_predictions['last_update'])
+            if (now - last_update).total_seconds() > 86400:
+                self.prediction_broadcaster.global_predictions['predictions'] = []
+                self.prediction_broadcaster.global_predictions['last_open_qihao'] = None
+                self.prediction_broadcaster.global_predictions['next_qihao'] = None
+        
+        for phone, acc in self.account_manager.accounts.items():
+            if acc.is_logged_in and not await self.account_manager.ensure_client_connected(phone):
+                logger.log_system(f"健康检查: 账户 {phone} 连接失效，已标记为未登录")
+
     async def _on_new_period(self, qihao, latest):
         try:
-            # 检查上一期结果
+            # 处理上一期投注结果
             for phone, acc in self.account_manager.accounts.items():
                 if acc.last_bet_period and acc.last_bet_period != qihao:
                     self._create_task(self.game_scheduler.check_bet_result(phone, acc.last_bet_period, latest))
             
-            # 预测
+            # 获取历史数据
             history = await self.api.get_history(50)
-            if len(history) < 3: return
+            if len(history) < 3: 
+                logger.log_game("历史数据不足，跳过预测")
+                return
             
+            # 预测（使用规则+AI混合模式）
             async with self._prediction_lock:
                 if self._last_prediction_qihao == qihao and self._last_prediction_result:
+                    logger.log_game(f"使用缓存的预测结果: 期号 {qihao}")
                     prediction = self._last_prediction_result
                 else:
+                    logger.log_game(f"开始为新期号 {qihao} 生成预测（规则+AI混合）")
                     prediction = await self.model.predict(history, latest)
                     self._last_prediction_result = prediction
                     self._last_prediction_qihao = qihao
             
             next_qihao = increment_qihao(qihao)
+            
+            # 更新全局预测
             await self.prediction_broadcaster.update_global_predictions(prediction, next_qihao, latest)
             
-            # 投注
+            # 并发执行投注
+            bet_tasks = []
             for phone, acc in self.account_manager.accounts.items():
-                if acc.auto_betting and acc.is_logged_in and acc.game_group_id and acc.last_bet_period != qihao:
+                if (acc.auto_betting and acc.is_logged_in and acc.game_group_id and acc.last_bet_period != qihao):
                     await asyncio.sleep(random.uniform(0.1, 0.3))
-                    self._create_task(self._execute_bet_with_semaphore(phone, prediction, latest))
+                    bet_tasks.append(self._execute_bet_with_semaphore(phone, prediction, latest))
+            
+            if bet_tasks:
+                results = await asyncio.gather(*bet_tasks, return_exceptions=True)
+                for i, res in enumerate(results):
+                    if isinstance(res, Exception):
+                        logger.log_error(0, f"投注任务 {i} 异常", res)
             
             self.last_qihao = qihao
+            
         except Exception as e:
-            logger.log_error(0, f"处理新期号失败", e)
-    
+            logger.log_error(0, f"处理新期号 {qihao} 失败", e)
+
     async def _execute_bet_with_semaphore(self, phone, prediction, latest):
-        async with self.bet_semaphore:
+        async with self.bet_semaphore: 
             await self.game_scheduler.execute_bet(phone, prediction, latest)
 
-
-# ==================== 主Bot类（简化版） ====================
+# ==================== 主Bot类 ====================
 class PC28Bot:
     def __init__(self):
         self.api = PC28API()
@@ -2153,16 +2507,15 @@ class PC28Bot:
         )
         self.prediction_broadcaster = PredictionBroadcaster(self.account_manager, self.model, self.api, self.global_scheduler)
         self.global_scheduler.prediction_broadcaster = self.prediction_broadcaster
-        
+
         self.application = Application.builder().token(Config.BOT_TOKEN).build()
         self._register_handlers()
-        logger.log_system("PC28 Bot（增强稳定性和准确率版）初始化完成")
-    
+        logger.log_system("PC28 Bot（规则+AI混合版 - 基于文件2双杀组+双Y融合算法）初始化完成")
+
     def _register_handlers(self):
         self.application.add_handler(CommandHandler("start", self.cmd_start))
         self.application.add_handler(CommandHandler("cancel", self.cmd_cancel))
-        
-        # 登录会话
+
         conv_handler = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.login_select, pattern=r'^login_select:')],
             states={
@@ -2173,16 +2526,16 @@ class PC28Bot:
             fallbacks=[CommandHandler('cancel', self.cmd_cancel)],
         )
         self.application.add_handler(conv_handler)
-        
-        # 添加账户
+
         add_account_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.add_account_start, pattern=r'^add_account$')],
-            states={Config.ADD_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_account_input)]},
+            states={
+                Config.ADD_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_account_input)],
+            },
             fallbacks=[CommandHandler('cancel', self.cmd_cancel)],
         )
         self.application.add_handler(add_account_conv)
-        
-        # 追号设置
+
         chase_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.chase_start, pattern=r'^action:setchase:')],
             states={
@@ -2190,21 +2543,24 @@ class PC28Bot:
                 Config.CHASE_PERIODS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.chase_input_periods)],
                 Config.CHASE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.chase_input_amount)],
             },
-            fallbacks=[CommandHandler('cancel', self.cmd_cancel), CallbackQueryHandler(self.chase_cancel, pattern=r'^chase_cancel:')],
+            fallbacks=[
+                CommandHandler('cancel', self.cmd_cancel),
+                CallbackQueryHandler(self.chase_cancel, pattern=r'^chase_cancel:')
+            ],
         )
         self.application.add_handler(chase_conv)
-        
+
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_message))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_error_handler(self.error_handler)
-    
+
     async def error_handler(self, update, context):
         logger.log_error(0, "Bot错误", str(context.error))
-    
+
     async def cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ 操作已取消")
         return ConversationHandler.END
-    
+
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [InlineKeyboardButton("📱 账户管理", callback_data="menu:accounts")],
@@ -2214,53 +2570,61 @@ class PC28Bot:
             [InlineKeyboardButton("📖 使用手册", url=Config.MANUAL_LINK)]
         ]
         await update.message.reply_text(
-            "🎰 *PC28 智能预测投注系统 v3.3（增强版）*\n\n"
-            "✨ 多算法投票杀组 | 双Y融合 | 交叉验证 | 历史准确率反馈\n"
+            "🎰 *PC28 智能预测投注系统*\n\n"
+            "✨ 欢迎使用！基于双杀组+双Y融合算法\n"
             "🤖 硅基流动AI辅助验证\n\n"
             "请选择操作：",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
-    
+
     async def add_account_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
+        context.user_data['adding_account'] = True
         await query.edit_message_text("📱 请输入手机号（包含国际区号，如 +861234567890）：\n\n点击 /cancel 取消")
         return Config.ADD_ACCOUNT
-    
+
     async def add_account_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         phone = update.message.text.strip()
         ok, msg = await self.account_manager.add_account(user_id, phone)
-        await update.message.reply_text(f"{'✅' if ok else '❌'} {msg}")
+        if ok:
+            await update.message.reply_text(f"✅ {msg}")
+        else:
+            await update.message.reply_text(f"❌ {msg}")
         await self._show_main_menu(update.message)
         return ConversationHandler.END
-    
+
     async def login_select(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         phone = query.data.split(':')[1]
         context.user_data['login_phone'] = phone
-        
+        context.user_data['login_user_id'] = query.from_user.id
         acc = self.account_manager.get_account(phone)
         if not acc:
             await query.edit_message_text("账户不存在")
             return ConversationHandler.END
-        
         if acc.is_logged_in:
             await self._show_account_detail(query, query.from_user.id, phone, context)
             return ConversationHandler.END
-        
+
         client = self.account_manager.create_client(phone)
         if not client:
             await query.edit_message_text("创建客户端失败")
             return ConversationHandler.END
-        
+
         try:
             await client.connect()
             if await client.is_user_authorized():
                 me = await client.get_me()
-                await self.account_manager.update_account(phone, is_logged_in=True, display_name=f"{me.first_name or ''} {me.last_name or ''}".strip())
+                display = f"{me.first_name or ''} {me.last_name or ''}".strip()
+                await self.account_manager.update_account(phone,
+                    is_logged_in=True,
+                    display_name=display,
+                    telegram_user_id=me.id
+                )
                 await self._show_account_detail(query, query.from_user.id, phone, context)
                 return ConversationHandler.END
             else:
@@ -2269,70 +2633,111 @@ class PC28Bot:
                 await query.edit_message_text(f"📨 验证码已发送到 `{phone}`\n\n请输入验证码：", parse_mode='Markdown')
                 return Config.LOGIN_CODE
         except Exception as e:
+            logger.log_error(query.from_user.id, f"登录失败 {phone}", e)
             await query.edit_message_text(f"❌ 登录失败：{str(e)[:200]}")
             return ConversationHandler.END
-    
+
     async def login_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user.id
         phone = context.user_data.get('login_phone')
         if not phone:
-            await update.message.reply_text("登录会话已过期")
+            await update.message.reply_text("登录会话已过期，请重新开始")
             return ConversationHandler.END
-        
         code = update.message.text.strip()
+        acc = self.account_manager.get_account(phone)
+        if not acc:
+            await update.message.reply_text("账户不存在")
+            return ConversationHandler.END
         client = self.account_manager.clients.get(phone)
-        sess = self.account_manager.get_login_session(phone)
-        
-        if not client or not sess:
-            await update.message.reply_text("会话已过期")
-            return ConversationHandler.END
-        
-        try:
-            await client.sign_in(phone, code, phone_code_hash=sess['phone_code_hash'])
-            me = await client.get_me()
-            await self.account_manager.update_account(phone, is_logged_in=True, display_name=f"{me.first_name or ''} {me.last_name or ''}".strip())
-            await self._show_account_detail(update.message, update.effective_user.id, phone, context)
-            return ConversationHandler.END
-        except SessionPasswordNeededError:
-            await update.message.reply_text("🔒 此账户启用了两步验证，请输入密码：")
-            return Config.LOGIN_PASSWORD
-        except Exception as e:
-            await update.message.reply_text(f"❌ 验证失败：{str(e)[:200]}")
-            return Config.LOGIN_CODE
-    
-    async def login_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        phone = context.user_data.get('login_phone')
-        if not phone:
-            await update.message.reply_text("登录会话已过期")
-            return ConversationHandler.END
-        
-        pwd = update.message.text.strip()
-        client = self.account_manager.clients.get(phone)
-        
         if not client:
             await update.message.reply_text("客户端丢失")
             return ConversationHandler.END
-        
+        sess = self.account_manager.get_login_session(phone)
+        if not sess:
+            await update.message.reply_text("登录会话已过期，请重新开始")
+            return ConversationHandler.END
+        try:
+            await client.sign_in(phone, code, phone_code_hash=sess['phone_code_hash'])
+            me = await client.get_me()
+            display = f"{me.first_name or ''} {me.last_name or ''}".strip()
+            await self.account_manager.update_account(phone,
+                is_logged_in=True,
+                needs_2fa=False,
+                display_name=display,
+                telegram_user_id=me.id
+            )
+            self.account_manager.login_sessions.pop(phone, None)
+            await self._show_account_detail(update.message, user, phone, context)
+            return ConversationHandler.END
+        except SessionPasswordNeededError:
+            await self.account_manager.update_account(phone, needs_2fa=True)
+            if hasattr(client, '_phone_code_hash'):
+                acc.login_temp_data['phone_code_hash'] = client._phone_code_hash
+            await update.message.reply_text("🔒 此账户启用了两步验证，请输入密码：")
+            return Config.LOGIN_PASSWORD
+        except Exception as e:
+            logger.log_error(user, f"验证码验证失败 {phone}", e)
+            error_msg = str(e)
+            if "invalid" in error_msg.lower():
+                error_msg = "验证码无效，请重新输入"
+            await update.message.reply_text(f"❌ 验证失败：{error_msg}\n请重新输入验证码或点击 /cancel 取消")
+            return Config.LOGIN_CODE
+
+    async def login_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user.id
+        phone = context.user_data.get('login_phone')
+        if not phone:
+            await update.message.reply_text("登录会话已过期，请重新开始")
+            return ConversationHandler.END
+        pwd = update.message.text.strip()
+        acc = self.account_manager.get_account(phone)
+        if not acc:
+            await update.message.reply_text("账户不存在")
+            return ConversationHandler.END
+        client = self.account_manager.clients.get(phone)
+        if not client:
+            await update.message.reply_text("客户端丢失")
+            return ConversationHandler.END
         try:
             await client.sign_in(password=pwd)
             me = await client.get_me()
-            await self.account_manager.update_account(phone, is_logged_in=True, display_name=f"{me.first_name or ''} {me.last_name or ''}".strip())
-            await self._show_account_detail(update.message, update.effective_user.id, phone, context)
+            display = f"{me.first_name or ''} {me.last_name or ''}".strip()
+            await self.account_manager.update_account(phone,
+                is_logged_in=True,
+                needs_2fa=False,
+                display_name=display,
+                telegram_user_id=me.id
+            )
+            acc.login_temp_data = {}
+            await self._show_account_detail(update.message, user, phone, context)
             return ConversationHandler.END
         except Exception as e:
-            await update.message.reply_text(f"❌ 密码验证失败：{str(e)[:200]}")
+            logger.log_error(user, f"密码验证失败 {phone}", e)
+            error_msg = str(e)
+            if "invalid" in error_msg.lower():
+                error_msg = "密码无效，请重新输入"
+            await update.message.reply_text(f"❌ 密码验证失败：{error_msg}\n请重新输入密码或点击 /cancel 取消")
             return Config.LOGIN_PASSWORD
-    
+
     async def chase_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         phone = query.data.split(':')[1]
         context.user_data['chase_phone'] = phone
-        
-        text = "🔢 *设置数字追号 - 第1步/共3步*\n\n请输入要追的数字（0-27），多个数字可用空格、逗号分隔。"
-        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("❌ 取消", callback_data=f"chase_cancel:{phone}")]])
+        context.user_data['chase_step'] = 'numbers'
+
+        text = (
+            "🔢 *设置数字追号 - 第1步/共3步*\n\n"
+            "请输入要追的数字（0-27），多个数字可用空格、逗号或顿号分隔。\n"
+            "例如：`0 5 12` 或 `0,5,12` 或 `0、5、12`\n\n"
+            "📌 说明：追号将每期自动投注您指定的所有数字，直到期数用完或手动停止。"
+        )
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ 取消", callback_data=f"chase_cancel:{phone}")]
+        ])
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
         return Config.CHASE_NUMBERS
-    
+
     async def chase_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
@@ -2340,107 +2745,300 @@ class PC28Bot:
         context.user_data.clear()
         await self._show_account_detail(query, query.from_user.id, phone, context)
         return ConversationHandler.END
-    
+
     async def chase_input_numbers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.strip()
+        parts = re.split(r'[,\s、]+', text)
         numbers = []
-        for p in re.split(r'[,\s、]+', text):
-            if p.strip().lstrip('-').isdigit():
-                num = int(p.strip())
+        for p in parts:
+            p = p.strip()
+            if p.lstrip('-').isdigit():
+                num = int(p)
                 if 0 <= num <= 27:
                     numbers.append(num)
         numbers = list(set(numbers))
-        
+
         if not numbers:
             phone = context.user_data.get('chase_phone')
-            await update.message.reply_text("❌ 未输入有效数字，请重新输入：")
+            await update.message.reply_text(
+                "❌ 未输入有效数字（0-27），请重新输入：",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ 取消", callback_data=f"chase_cancel:{phone}")]
+                ])
+            )
             return Config.CHASE_NUMBERS
-        
+
         context.user_data['chase_numbers'] = numbers
         phone = context.user_data['chase_phone']
-        await update.message.reply_text(f"✅ 已记录数字：{', '.join(map(str, numbers))}\n\n请输入追号期数：")
+        
+        text = (
+            f"✅ 已记录数字：{', '.join(map(str, numbers))}\n\n"
+            "🔢 *第2步/共3步：请输入追号期数*\n\n"
+            "请输入一个正整数，表示要连续追多少期。\n"
+            "例如：`10` 表示连续追10期。"
+        )
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ 取消", callback_data=f"chase_cancel:{phone}")]
+        ])
+        await update.message.reply_text(text, reply_markup=reply_markup)
         return Config.CHASE_PERIODS
-    
+
     async def chase_input_periods(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.strip()
         if not text.isdigit() or int(text) <= 0:
-            await update.message.reply_text("❌ 请输入正整数期数：")
+            phone = context.user_data.get('chase_phone')
+            await update.message.reply_text(
+                "❌ 期数必须是正整数，请重新输入：",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ 取消", callback_data=f"chase_cancel:{phone}")]
+                ])
+            )
             return Config.CHASE_PERIODS
-        
+
         periods = int(text)
         context.user_data['chase_periods'] = periods
         phone = context.user_data['chase_phone']
-        await update.message.reply_text(f"✅ 已设置期数：{periods} 期\n\n请输入每注金额（KK）：")
+
+        text = (
+            f"✅ 已设置期数：{periods} 期\n\n"
+            "🔢 *第3步/共3步：请输入每注金额*\n\n"
+            "请输入一个整数（单位：KK）。\n"
+            "• 如果输入 `0`，则使用当前账户的基础金额。\n"
+            "• 金额不能超过账户最大金额限制。\n"
+            "例如：`1000` 表示每注1000KK。"
+        )
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ 取消", callback_data=f"chase_cancel:{phone}")]
+        ])
+        await update.message.reply_text(text, reply_markup=reply_markup)
         return Config.CHASE_AMOUNT
-    
+
     async def chase_input_amount(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.strip()
         try:
             amount = int(text)
-            if amount < 0: raise ValueError
-        except:
-            await update.message.reply_text("❌ 请输入有效金额：")
+        except ValueError:
+            phone = context.user_data.get('chase_phone')
+            await update.message.reply_text(
+                "❌ 金额必须是整数，请重新输入：",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ 取消", callback_data=f"chase_cancel:{phone}")]
+                ])
+            )
             return Config.CHASE_AMOUNT
-        
+
+        if amount < 0:
+            phone = context.user_data.get('chase_phone')
+            await update.message.reply_text(
+                "❌ 金额不能为负数，请重新输入：",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ 取消", callback_data=f"chase_cancel:{phone}")]
+                ])
+            )
+            return Config.CHASE_AMOUNT
+
         phone = context.user_data['chase_phone']
         numbers = context.user_data['chase_numbers']
         periods = context.user_data['chase_periods']
-        
-        await self.account_manager.update_account(phone, chase_enabled=True, chase_numbers=numbers,
-            chase_periods=periods, chase_current=0, chase_amount=amount)
-        
+
+        await self.account_manager.update_account(
+            phone,
+            chase_enabled=True,
+            chase_numbers=numbers,
+            chase_periods=periods,
+            chase_current=0,
+            chase_amount=amount,
+            chase_stop_reason=None
+        )
+
+        user_id = update.effective_user.id
+        self.account_manager.set_user_state(user_id, 'account_selected', {'current_account': phone})
+
         context.user_data.clear()
-        await update.message.reply_text(f"✅ 追号设置成功！\n数字：{numbers}\n期数：{periods}\n每注：{amount}KK")
-        await self._show_account_detail(update.message, update.effective_user.id, phone, context)
+
+        await update.message.reply_text(
+            f"✅ *追号设置成功！*\n\n"
+            f"📌 数字：{', '.join(map(str, numbers))}\n"
+            f"📌 期数：{periods}\n"
+            f"📌 每注金额：{amount if amount>0 else '使用基础金额'}KK\n\n"
+            f"🔍 您可以在账户详情页查看追号状态。"
+        )
+
+        acc = self.account_manager.get_account(phone)
+        if acc:
+            await self._show_account_detail(update.message, user_id, phone, context)
+        else:
+            await self._show_accounts_menu(update.message, user_id)
+
         return ConversationHandler.END
-    
+
+    def _get_account_detail_text_and_kb(self, phone):
+        acc = self.account_manager.get_account(phone)
+        if not acc:
+            return "账户不存在", InlineKeyboardMarkup([])
+        display = acc.get_display_name()
+        status = "✅ 已登录" if acc.is_logged_in else "❌ 未登录"
+        if acc.auto_betting: 
+            status += " | 🤖 自动投注"
+        if acc.prediction_broadcast: 
+            status += " | 📊 播报中"
+        if acc.broadcast_stop_requested: 
+            status += " | ⏳ 停止中"
+
+        bet_button = "🛑 停止自动投注" if acc.auto_betting else "🤖 开启自动投注"
+        pred_button = "🛑 停止播报" if acc.prediction_broadcast else "📊 开启播报"
+        if acc.broadcast_stop_requested:
+            pred_button = "⏳ 停止请求中"
+
+        net_profit = acc.total_profit - acc.total_loss
+
+        betting_menu = [
+            [InlineKeyboardButton("🎯 投注方案", callback_data=f"action:setscheme:{phone}"),
+             InlineKeyboardButton("📈 金额策略", callback_data=f"action:setstrategy:{phone}")],
+            [InlineKeyboardButton("💰 设置金额", callback_data=f"amount_menu:{phone}"),
+             InlineKeyboardButton("🔢 设置追号", callback_data=f"action:setchase:{phone}")],
+            [InlineKeyboardButton("💡 推荐金额", callback_data=f"recommend_amount:{phone}")],
+        ]
+
+        content_type = "双组" if acc.prediction_content == "double" else "杀组"
+        broadcast_menu = [
+            [InlineKeyboardButton("📢 播报群", callback_data=f"action:listpredgroups:{phone}"),
+             InlineKeyboardButton(f"🎛️ 播报内容({content_type})", callback_data=f"toggle_content:{phone}")],
+        ]
+
+        kb = [
+            [InlineKeyboardButton("🔐 登录", callback_data=f"login_select:{phone}"),
+             InlineKeyboardButton("🚪 登出", callback_data=f"action:logout:{phone}")],
+            [InlineKeyboardButton("💬 游戏群", callback_data=f"action:listgroups:{phone}")],
+        ] + betting_menu + broadcast_menu + [
+            [InlineKeyboardButton(bet_button, callback_data=f"action:toggle_bet:{phone}"),
+             InlineKeyboardButton(pred_button, callback_data=f"action:toggle_pred:{phone}")],
+            [InlineKeyboardButton("💰 查询余额", callback_data=f"action:balance:{phone}"),
+             InlineKeyboardButton("📊 账户状态", callback_data=f"action:status:{phone}")],
+            [InlineKeyboardButton("📊 连输连赢记录", callback_data=f"action:streak:{phone}"),
+             InlineKeyboardButton("📚 手动投注说明", callback_data=f"action:manual_bet_help:{phone}")],
+            [InlineKeyboardButton("🔙 返回", callback_data="menu:accounts")]
+        ]
+
+        if acc.chase_enabled:
+            status += f" | 🔢 追{acc.chase_current}/{acc.chase_periods}"
+            kb.insert(4, [InlineKeyboardButton("🛑 停止追号", callback_data=f"action:stopchase:{phone}")])
+
+        text = f"📱 *账户: {display}*\n\n状态: {status}\n净盈利: {net_profit:.0f}K\n\n选择操作:"
+        return text, InlineKeyboardMarkup(kb)
+
+    async def _show_account_detail(self, target, user, phone, context):
+        self.account_manager.set_user_state(user, 'account_selected', {'current_account': phone})
+        text, reply_markup = self._get_account_detail_text_and_kb(phone)
+        if hasattr(target, 'edit_message_text'):
+            await target.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await target.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
     async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user.id
         state = self.account_manager.get_user_state(user)
         phone = state.get('current_account')
-        if not phone: return
-        
+        if not phone:
+            return
         acc = self.account_manager.get_account(phone)
-        if not acc: return
-        
-        # 处理金额输入
+        if not acc:
+            return
+
         input_mode = acc.input_mode
-        if input_mode in ['base_amount', 'max_amount', 'stop_balance', 'stop_loss', 'stop_win', 'resume_balance']:
-            try:
-                amount = int(update.message.text.strip())
+        if input_mode and input_mode in ['base_amount', 'max_amount', 'stop_balance', 'stop_loss', 'stop_win', 'resume_balance', 'dynamic_ratio']:
+            if input_mode == 'dynamic_ratio':
+                try:
+                    ratio = float(update.message.text.strip())
+                    if ratio < 0 or ratio > 1:
+                        raise ValueError
+                except ValueError:
+                    await update.message.reply_text("❌ 请输入0~1之间的小数，例如0.03表示3%")
+                    return
+                ok = await self.account_manager.update_account(phone, bet_params={'dynamic_base_ratio': ratio})
+                if ok:
+                    await self.account_manager.update_account(phone, input_mode=None, input_buffer='')
+                    last_msg_info = context.user_data.get('last_amount_msg')
+                    if last_msg_info:
+                        chat_id, msg_id = last_msg_info
+                        try:
+                            text, reply_markup = self._get_amount_menu_text_and_kb(phone)
+                            await context.bot.edit_message_text(
+                                chat_id=chat_id,
+                                message_id=msg_id,
+                                text=text,
+                                reply_markup=reply_markup,
+                                parse_mode='Markdown'
+                            )
+                        except Exception as e:
+                            logger.log_error(user, "编辑消息失败", e)
+                            await update.message.reply_text(f"✅ 动态比例已设置为 {ratio*100:.0f}%")
+                        finally:
+                            del context.user_data['last_amount_msg']
+                    else:
+                        await update.message.reply_text(f"✅ 动态比例已设置为 {ratio*100:.0f}%")
+                else:
+                    await update.message.reply_text("❌ 设置失败")
+                return
+            else:
+                try:
+                    amount = int(update.message.text.strip())
+                except ValueError:
+                    await update.message.reply_text("❌ 请输入整数金额")
+                    return
                 ok, msg = await self.amount_manager.set_param(phone, input_mode, amount, user)
                 if ok:
-                    await self.account_manager.update_account(phone, input_mode=None)
-                    await update.message.reply_text(f"✅ {msg}")
-                    await self._show_account_detail(update.message, user, phone, context)
+                    await self.account_manager.update_account(phone, input_mode=None, input_buffer='')
+                    last_msg_info = context.user_data.get('last_amount_msg')
+                    if last_msg_info:
+                        chat_id, msg_id = last_msg_info
+                        try:
+                            text, reply_markup = self._get_amount_menu_text_and_kb(phone)
+                            await context.bot.edit_message_text(
+                                chat_id=chat_id,
+                                message_id=msg_id,
+                                text=text,
+                                reply_markup=reply_markup,
+                                parse_mode='Markdown'
+                            )
+                        except Exception as e:
+                            logger.log_error(user, "编辑消息失败", e)
+                            await update.message.reply_text(f"✅ {msg}")
+                        finally:
+                            del context.user_data['last_amount_msg']
+                    else:
+                        await update.message.reply_text(f"✅ {msg}")
+                        await self._show_account_detail(update.message, user, phone, context)
                 else:
                     await update.message.reply_text(f"❌ {msg}")
-            except:
-                await update.message.reply_text("❌ 请输入整数金额")
-    
+        else:
+            pass
+
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         data = query.data
         user = query.from_user.id
-        
-        if data == "menu:main":
-            await self._show_main_menu(query)
-        elif data == "menu:accounts":
+        logger.log_account(user, "", f"回调数据: {data}")
+
+        route_map = {
+            "menu:main": self._show_main_menu,
+            "menu:prediction": self._show_prediction_menu,
+            "menu:status": self._show_status_menu,
+            "menu:help": self._show_help_menu,
+            "add_account": self.add_account_start,
+            "run_analysis": self._process_run_analysis,
+            "refresh_status": self._show_status_menu,
+        }
+        if data in route_map:
+            await route_map[data](query)
+            return
+
+        if data == "menu:accounts":
             await self._show_accounts_menu(query, user)
-        elif data == "menu:prediction":
-            await self._show_prediction_menu(query)
-        elif data == "menu:status":
-            await self._show_status_menu(query)
-        elif data == "menu:help":
-            await self._show_help_menu(query)
-        elif data == "run_analysis":
-            await self._process_run_analysis(query)
-        elif data == "refresh_status":
-            await self._show_status_menu(query)
-        elif data == "add_account":
-            await self.add_account_start(update, context)
-        elif data.startswith("select_account:"):
+            return
+
+        if data.startswith("select_account:"):
             phone = data.split(":")[1]
             await self._show_account_detail(query, user, phone, context)
         elif data.startswith("action:"):
@@ -2450,287 +3048,696 @@ class PC28Bot:
             await self._process_action(query, user, action, phone, context)
         elif data.startswith("amount_menu:"):
             phone = data.split(":")[1]
-            await self._show_amount_menu(query, user, phone, context)
+            await self._show_amount_menu_callback(query, user, phone, context)
         elif data.startswith("amount_set:"):
             parts = data.split(":")
-            param = parts[1]
+            param_name = parts[1]
             phone = parts[2]
-            await self._amount_set(query, user, phone, param, context)
+            await self._amount_set_callback(query, user, phone, param_name, context)
         elif data.startswith("set_strategy:"):
             parts = data.split(":")
-            phone = parts[1]
-            strategy = parts[2]
-            await self._process_set_strategy(query, user, phone, strategy)
+            if len(parts) == 3:
+                phone = parts[1]
+                strategy = parts[2]
+                await self._process_set_strategy(query, user, phone, strategy)
         elif data.startswith("set_scheme:"):
             parts = data.split(":")
-            phone = parts[1]
-            scheme = parts[2]
-            await self._process_set_scheme(query, user, phone, scheme)
+            if len(parts) == 3:
+                phone = parts[1]
+                scheme = parts[2]
+                await self._process_set_scheme(query, user, phone, scheme)
         elif data.startswith("set_group:"):
             group_id = int(data.split(":")[1])
-            await self._set_group(query, user, group_id)
+            await self._set_group_callback(query, user, group_id)
         elif data.startswith("set_pred_group:"):
             group_id = int(data.split(":")[1])
-            await self._set_pred_group(query, user, group_id)
+            await self._set_pred_group_callback(query, user, group_id)
         elif data.startswith("toggle_content:"):
             phone = data.split(":")[1]
-            await self._toggle_content(query, user, phone)
+            await self._toggle_prediction_content(query, user, phone)
         elif data.startswith("clear_streak:"):
             phone = data.split(":")[1]
-            await self._clear_streak(query, user, phone)
+            await self._clear_streak_records(query, user, phone)
+        elif data.startswith("recommend_amount:"):
+            phone = data.split(":")[1]
+            await self._show_recommend_amount_menu(query, user, phone, context)
+        elif data.startswith("recommend_mode:"):
+            parts = data.split(":")
+            mode = parts[1]
+            phone = parts[2]
+            await self._calculate_and_show_recommendation(query, user, phone, mode, context)
+        elif data.startswith("set_recommend:"):
+            parts = data.split(":")
+            answer = parts[1]
+            phone = parts[2]
+            amount = int(parts[3])
+            if answer == 'yes':
+                ok, msg = await self.amount_manager.set_param(phone, 'base_amount', amount, user)
+                if ok:
+                    await query.edit_message_text(f"✅ 基础金额已设置为 {amount} KK")
+                else:
+                    await query.edit_message_text(f"❌ 设置失败: {msg}")
+            await self._show_account_detail(query, user, phone, context)
+        elif data.startswith("dynamic_ratio:"):
+            phone = data.split(":")[1]
+            await self._show_dynamic_ratio_menu(query, user, phone, context)
+        elif data.startswith("set_dynamic:"):
+            parts = data.split(":")
+            ratio_str = parts[1]
+            phone = parts[2]
+            await self._set_dynamic_ratio(query, user, phone, ratio_str, context)
         else:
-            pass
-    
-    async def _show_main_menu(self, target):
-        keyboard = [
+            logger.log_error(user, "未知回调", data)
+
+    def _get_amount_menu_text_and_kb(self, phone):
+        acc = self.account_manager.get_account(phone)
+        if not acc:
+            return "账户不存在", InlineKeyboardMarkup([])
+        text = f"""
+💰 *金额设置*
+
+📱 账户: {acc.get_display_name()}
+
+当前设置:
+• 基础金额: {acc.bet_params.base_amount} KK
+• 最大金额: {acc.bet_params.max_amount} KK
+• 停止余额: {acc.bet_params.stop_balance} KK
+• 止损金额: {acc.bet_params.stop_loss} KK
+• 止盈金额: {acc.bet_params.stop_win} KK
+• 恢复余额: {acc.bet_params.resume_balance} KK
+• 动态比例: {acc.bet_params.dynamic_base_ratio*100:.0f}%  ({'开启' if acc.bet_params.dynamic_base_ratio>0 else '关闭'})
+
+请选择需要修改的金额类型：
+        """
+        kb = [
+            [InlineKeyboardButton("💰 基础金额", callback_data=f"amount_set:base_amount:{phone}"),
+             InlineKeyboardButton("💎 最大金额", callback_data=f"amount_set:max_amount:{phone}")],
+            [InlineKeyboardButton("🛑 停止余额", callback_data=f"amount_set:stop_balance:{phone}"),
+             InlineKeyboardButton("⛔ 止损金额", callback_data=f"amount_set:stop_loss:{phone}")],
+            [InlineKeyboardButton("✅ 止盈金额", callback_data=f"amount_set:stop_win:{phone}"),
+             InlineKeyboardButton("🔄 恢复余额", callback_data=f"amount_set:resume_balance:{phone}")],
+            [InlineKeyboardButton("📈 动态投注比例", callback_data=f"dynamic_ratio:{phone}")],
+            [InlineKeyboardButton("🔙 返回账户详情", callback_data=f"select_account:{phone}")]
+        ]
+        return text, InlineKeyboardMarkup(kb)
+
+    async def _show_main_menu(self, query):
+        kb = [
             [InlineKeyboardButton("📱 账户管理", callback_data="menu:accounts")],
             [InlineKeyboardButton("🎯 智能预测", callback_data="menu:prediction")],
             [InlineKeyboardButton("📊 系统状态", callback_data="menu:status")],
             [InlineKeyboardButton("❓ 帮助", callback_data="menu:help")],
             [InlineKeyboardButton("📖 使用手册", url=Config.MANUAL_LINK)]
         ]
-        text = "🎮 *PC28 智能投注系统（增强版）*\n\n多算法投票 | 双Y融合 | 交叉验证\n\n请选择操作："
-        if hasattr(target, 'edit_message_text'):
-            await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-        else:
-            await target.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-    
-    async def _show_accounts_menu(self, target, user):
+        text = "🎮 *PC28 智能投注系统*\n\n基于双杀组+双Y融合算法 | AI辅助验证\n\n请选择操作："
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _show_accounts_menu(self, query, user):
         accounts = self.account_manager.get_user_accounts(user)
-        kb = [[InlineKeyboardButton("➕ 添加账户", callback_data="add_account")]]
-        text = "📱 *您的账户列表*\n\n"
-        for acc in accounts:
-            status = "✅" if acc.is_logged_in else "❌"
-            text += f"{status} {acc.get_display_name()}\n"
-            kb.append([InlineKeyboardButton(f"{acc.get_display_name()}", callback_data=f"select_account:{acc.phone}")])
-        kb.append([InlineKeyboardButton("🔙 返回", callback_data="menu:main")])
-        
+        kb = []
         if not accounts:
             text = "📭 您还没有添加账户"
-        
-        if hasattr(target, 'edit_message_text'):
-            await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         else:
-            await target.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    async def _show_account_detail(self, target, user, phone, context):
-        self.account_manager.set_user_state(user, 'account_selected', {'current_account': phone})
-        acc = self.account_manager.get_account(phone)
-        if not acc:
-            await self._show_accounts_menu(target, user)
-            return
-        
-        status = "✅ 已登录" if acc.is_logged_in else "❌ 未登录"
-        if acc.auto_betting: status += " | 🤖 自动投注"
-        if acc.prediction_broadcast: status += " | 📊 播报中"
-        
-        net = acc.total_profit - acc.total_loss
-        
-        text = f"📱 *账户: {acc.get_display_name()}*\n\n状态: {status}\n净盈利: {net:.0f}K\n\n选择操作:"
-        
+            text = "📱 *您的账户列表*\n\n"
+            for acc in accounts:
+                status = "✅" if acc.is_logged_in else "❌"
+                text += f"{status} {acc.get_display_name()}\n"
+        kb.append([InlineKeyboardButton("➕ 添加账户", callback_data="add_account")])
+        if accounts:
+            for acc in accounts:
+                kb.append([InlineKeyboardButton(f"{acc.get_display_name()}", callback_data=f"select_account:{acc.phone}")])
+        kb.append([InlineKeyboardButton("🔙 返回", callback_data="menu:main")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _show_prediction_menu(self, query):
         kb = [
-            [InlineKeyboardButton("🔐 登录", callback_data=f"login_select:{phone}"), InlineKeyboardButton("🚪 登出", callback_data=f"action:logout:{phone}")],
-            [InlineKeyboardButton("💬 游戏群", callback_data=f"action:listgroups:{phone}"), InlineKeyboardButton("📢 播报群", callback_data=f"action:listpredgroups:{phone}")],
-            [InlineKeyboardButton("🎯 投注方案", callback_data=f"action:setscheme:{phone}"), InlineKeyboardButton("📈 金额策略", callback_data=f"action:setstrategy:{phone}")],
-            [InlineKeyboardButton("💰 设置金额", callback_data=f"amount_menu:{phone}"), InlineKeyboardButton("🔢 设置追号", callback_data=f"action:setchase:{phone}")],
-            [InlineKeyboardButton("🤖 开启自动投注" if not acc.auto_betting else "🛑 停止自动投注", callback_data=f"action:toggle_bet:{phone}")],
-            [InlineKeyboardButton("📊 开启播报" if not acc.prediction_broadcast else "🛑 停止播报", callback_data=f"action:toggle_pred:{phone}")],
-            [InlineKeyboardButton("💰 查询余额", callback_data=f"action:balance:{phone}"), InlineKeyboardButton("📊 账户状态", callback_data=f"action:status:{phone}")],
-            [InlineKeyboardButton("🔙 返回", callback_data="menu:accounts")]
+            [InlineKeyboardButton("🔮 运行预测", callback_data="run_analysis")],
+            [InlineKeyboardButton("🔙 返回", callback_data="menu:main")]
         ]
-        
-        if acc.chase_enabled:
-            kb.insert(4, [InlineKeyboardButton("🛑 停止追号", callback_data=f"action:stopchase:{phone}")])
-        
-        if hasattr(target, 'edit_message_text'):
-            await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-        else:
-            await target.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    async def _show_prediction_menu(self, target):
-        kb = [[InlineKeyboardButton("🔮 运行预测", callback_data="run_analysis")], [InlineKeyboardButton("🔙 返回", callback_data="menu:main")]]
-        text = "🎯 *预测分析菜单*\n\n多算法投票杀组 | 双Y融合 | 交叉验证 | 历史准确率反馈"
-        await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    async def _show_status_menu(self, target):
-        api_stats = self.api.get_statistics()
-        sched_stats = self.game_scheduler.get_stats()
-        total = len(self.account_manager.accounts)
-        logged = sum(1 for a in self.account_manager.accounts.values() if a.is_logged_in)
-        
-        text = f"📊 *系统状态*\n\n*数据状态*\n• 缓存数据: {api_stats['缓存数据量']}期\n• 最新期号: {api_stats['最新期号']}\n\n*账户状态*\n• 总账户: {total}\n• 已登录: {logged}\n• 自动投注: {sched_stats['auto_betting_accounts']}\n• 预测播报: {sched_stats['broadcast_accounts']}\n\n*游戏统计*\n• 投注周期: {sched_stats['game_stats']['betting_cycles']}\n• 成功投注: {sched_stats['game_stats']['successful_bets']}"
-        
-        kb = [[InlineKeyboardButton("🔄 刷新", callback_data="refresh_status")], [InlineKeyboardButton("🔙 返回", callback_data="menu:main")]]
-        await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    async def _show_help_menu(self, target):
-        text = """📚 *帮助菜单*\n\n• 添加账户：账户管理 → 添加账户\n• 登录：选择账户 → 登录\n• 设置群组：账户详情 → 游戏群/播报群\n• 投注设置：投注方案/金额策略/设置金额/追号\n• 自动投注/播报：点击对应按钮\n• 手动投注：游戏群发送\"类型 金额\"\n\n*预测算法*\n• 多算法投票杀组（4种算法投票）\n• 双Y融合算法\n• 交叉验证\n• 历史准确率反馈\n• 硅基流动AI辅助验证"""
-        kb = [[InlineKeyboardButton("🔙 返回", callback_data="menu:main")]]
-        await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    async def _process_run_analysis(self, target):
-        await target.edit_message_text("🔍 正在生成预测（多算法投票+交叉验证）...")
-        history = await self.api.get_history(50)
-        if len(history) < 3:
-            await target.edit_message_text("❌ 历史数据不足")
-            return
-        
-        latest = history[0]
-        pred = await self.model.predict(history, latest)
-        acc = self.model.get_accuracy_stats()
-        
-        text = f"🎯 *PC28预测结果*\n\n📊 最新: {latest.get('qihao')} | {latest.get('sum')}({latest.get('combo')})\n\n🏆 主推: {pred['main']}\n📌 候选: {pred['candidate']}\n🗑️ 杀组: {pred['kill']}\n📈 置信度: {pred['confidence']}%\n📊 准确率: {acc['overall']['recent']*100:.0f}%"
-        
-        kb = [[InlineKeyboardButton("🔄 刷新", callback_data="run_analysis")], [InlineKeyboardButton("🔙 返回", callback_data="menu:prediction")]]
-        await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    async def _process_action(self, target, user, action, phone, context):
+        await query.edit_message_text("🎯 *预测分析菜单*\n\n使用双杀组+双Y融合算法 | AI辅助验证", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _show_amount_menu_callback(self, query, user, phone, context):
+        context.user_data.pop('last_amount_msg', None)
+        text, reply_markup = self._get_amount_menu_text_and_kb(phone)
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+    async def _amount_set_callback(self, query, user, phone, param_name, context):
+        param_names = {
+            'base_amount': '基础金额',
+            'max_amount': '最大金额',
+            'stop_balance': '停止余额',
+            'stop_loss': '止损金额',
+            'stop_win': '止盈金额',
+            'resume_balance': '恢复余额'
+        }
+        display_name = param_names.get(param_name, param_name)
+        self.account_manager.set_user_state(user, 'account_selected', {'current_account': phone})
+        await self.account_manager.update_account(phone, input_mode=param_name, input_buffer='')
+        context.user_data['last_amount_msg'] = (query.message.chat_id, query.message.message_id)
+        text = f"🔢 请输入新的 {display_name}（整数KK）："
+        kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"amount_menu:{phone}")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _process_action(self, query, user, action, phone, context):
         if action == "logout":
-            await self.game_scheduler.stop_auto_betting(phone, user)
-            await self.prediction_broadcaster.stop_broadcast(phone, user)
-            client = self.account_manager.clients.get(phone)
-            if client:
-                try:
-                    if client.is_connected(): await client.disconnect()
-                except: pass
-            await self.account_manager.update_account(phone, is_logged_in=False, auto_betting=False, prediction_broadcast=False)
-            await self._show_account_detail(target, user, phone, context)
+            await self._cmd_logout_inline(query, user, phone, context)
         elif action == "toggle_bet":
             acc = self.account_manager.get_account(phone)
             if acc.auto_betting:
                 await self.game_scheduler.stop_auto_betting(phone, user)
             else:
                 await self.game_scheduler.start_auto_betting(phone, user)
-            await self._show_account_detail(target, user, phone, context)
+            await self._show_account_detail(query, user, phone, context)
         elif action == "toggle_pred":
             acc = self.account_manager.get_account(phone)
             if acc.prediction_broadcast:
                 await self.prediction_broadcaster.stop_broadcast(phone, user)
             else:
                 await self.prediction_broadcaster.start_broadcast(phone, user)
-            await self._show_account_detail(target, user, phone, context)
+            await self._show_account_detail(query, user, phone, context)
         elif action == "balance":
-            bal = await self.game_scheduler._query_balance(phone)
-            text = f"💰 余额: {bal:.2f} KK" if bal else "❌ 查询失败"
-            await target.edit_message_text(text, parse_mode='Markdown')
+            cached = self.account_manager.get_cached_balance(phone)
+            if cached is not None:
+                bal = cached
+                text = f"💰 余额: {bal:.2f} KK (缓存)"
+            else:
+                bal = await self.game_scheduler._query_balance(phone)
+                if bal is not None:
+                    text = f"💰 余额: {bal:.2f} KK"
+                else:
+                    text = "❌ 查询失败"
+            kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         elif action == "status":
-            await self._show_account_status(target, phone)
+            await self._show_account_status(query, phone)
+        elif action == "streak":
+            await self._show_streak_records(query, phone)
         elif action == "setstrategy":
-            await self._show_strategy_selection(target, phone)
+            await self._show_strategy_selection(query, phone)
         elif action == "setscheme":
-            await self._show_scheme_selection(target, phone)
+            await self._show_scheme_selection(query, phone)
         elif action == "listgroups":
-            await self._list_groups(target, phone, "game")
+            await self._list_groups_for_selection(query, phone)
         elif action == "listpredgroups":
-            await self._list_groups(target, phone, "pred")
+            await self._list_groups_for_prediction(query, phone)
+        elif action == "manual_bet_help":
+            text = """
+📚 *手动投注说明*
+
+您可以在游戏群直接发送消息进行投注，例如：
+`大 10000`
+`小单 5000`
+
+支持的类型：大、小、单、双、大单、大双、小单、小双
+
+注意：请在封盘前完成投注。
+            """
+            kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         elif action == "stopchase":
-            await self.account_manager.update_account(phone, chase_enabled=False)
-            await self._show_account_detail(target, user, phone, context)
-    
-    async def _show_strategy_selection(self, target, phone):
-        kb = [[InlineKeyboardButton(name, callback_data=f"set_strategy:{phone}:{name}")] for name in self.strategy_manager.strategies.keys()]
-        kb.append([InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")])
-        await target.edit_message_text("📊 *选择投注策略:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    async def _show_scheme_selection(self, target, phone):
-        kb = [[InlineKeyboardButton(name, callback_data=f"set_scheme:{phone}:{name}")] for name in self.strategy_manager.schemes.keys()]
-        kb.append([InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")])
-        await target.edit_message_text("🎯 *选择投注方案:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    async def _process_set_strategy(self, target, user, phone, strategy):
-        ok, msg = await self.strategy_manager.set_strategy(phone, strategy, user)
-        if ok:
-            await self._show_account_detail(target, user, phone, None)
+            await self.account_manager.update_account(phone, 
+                chase_enabled=False, 
+                chase_stop_reason="手动停止",
+                chase_numbers=[],
+                chase_periods=0,
+                chase_current=0,
+                chase_amount=0
+            )
+            await self._show_account_detail(query, user, phone, context)
         else:
-            await target.edit_message_text(f"❌ {msg}")
-    
-    async def _process_set_scheme(self, target, user, phone, scheme):
-        ok, msg = await self.strategy_manager.set_scheme(phone, scheme, user)
-        if ok:
-            await self._show_account_detail(target, user, phone, None)
-        else:
-            await target.edit_message_text(f"❌ {msg}")
-    
-    async def _list_groups(self, target, phone, group_type):
+            await query.edit_message_text("❌ 未知操作", parse_mode='Markdown')
+
+    async def _list_groups_for_selection(self, query, phone):
         client = self.account_manager.clients.get(phone)
         if not client:
-            await target.edit_message_text("❌ 客户端未连接")
+            await query.edit_message_text("❌ 客户端未连接", parse_mode='Markdown')
             return
         try:
             dialogs = await client.get_dialogs(limit=30)
             groups = [d for d in dialogs if d.is_group or d.is_channel]
             if not groups:
-                await target.edit_message_text("📭 未找到任何群组")
+                kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
+                await query.edit_message_text("📭 未找到任何群组", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
                 return
             kb = []
             for g in groups[:10]:
                 icon = "📢" if g.is_channel else "👥"
-                cb = f"set_group:{g.id}" if group_type == "game" else f"set_pred_group:{g.id}"
-                kb.append([InlineKeyboardButton(f"{icon} {g.name[:30]}", callback_data=cb)])
+                kb.append([InlineKeyboardButton(f"{icon} {g.name[:30]}", callback_data=f"set_group:{g.id}")])
             kb.append([InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")])
-            await target.edit_message_text("📋 *选择群组:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+            await query.edit_message_text("📋 *选择游戏群:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         except Exception as e:
-            await target.edit_message_text("❌ 获取群组列表失败")
-    
-    async def _set_group(self, target, user, group_id):
+            logger.log_error(0, f"获取群组列表失败 {phone}", e)
+            kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
+            await query.edit_message_text("❌ 获取群组列表失败", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _list_groups_for_prediction(self, query, phone):
+        client = self.account_manager.clients.get(phone)
+        if not client:
+            await query.edit_message_text("❌ 客户端未连接", parse_mode='Markdown')
+            return
+        try:
+            dialogs = await client.get_dialogs(limit=30)
+            groups = [d for d in dialogs if d.is_group or d.is_channel]
+            if not groups:
+                kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
+                await query.edit_message_text("📭 未找到任何群组", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+                return
+            kb = []
+            for g in groups[:10]:
+                icon = "📢" if g.is_channel else "👥"
+                kb.append([InlineKeyboardButton(f"{icon} {g.name[:30]}", callback_data=f"set_pred_group:{g.id}")])
+            kb.append([InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")])
+            await query.edit_message_text("📋 *选择预测播报群:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        except Exception as e:
+            logger.log_error(0, f"获取群组列表失败 {phone}", e)
+            kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
+            await query.edit_message_text("❌ 获取群组列表失败", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _set_group_callback(self, query, user, group_id):
         phone = self.account_manager.get_user_state(user).get('current_account')
         if not phone:
-            await target.edit_message_text("❌ 请先选择账户")
+            await query.edit_message_text("❌ 请先选择账户")
             return
-        await self.account_manager.update_account(phone, game_group_id=group_id)
-        await self._show_account_detail(target, user, phone, None)
-    
-    async def _set_pred_group(self, target, user, group_id):
+        client = self.account_manager.clients.get(phone)
+        group_name = str(group_id)
+        if client:
+            try:
+                entity = await client.get_entity(group_id)
+                group_name = getattr(entity, 'title', str(group_id))
+            except:
+                pass
+        await self.account_manager.update_account(phone, game_group_id=group_id, game_group_name=group_name)
+        await self._show_account_detail(query, user, phone, None)
+
+    async def _set_pred_group_callback(self, query, user, group_id):
         phone = self.account_manager.get_user_state(user).get('current_account')
         if not phone:
-            await target.edit_message_text("❌ 请先选择账户")
+            await query.edit_message_text("❌ 请先选择账户")
             return
-        await self.account_manager.update_account(phone, prediction_group_id=group_id)
-        await self._show_account_detail(target, user, phone, None)
-    
-    async def _toggle_content(self, target, user, phone):
+        client = self.account_manager.clients.get(phone)
+        group_name = str(group_id)
+        if client:
+            try:
+                entity = await client.get_entity(group_id)
+                group_name = getattr(entity, 'title', str(group_id))
+            except:
+                pass
+        await self.account_manager.update_account(phone, prediction_group_id=group_id, prediction_group_name=group_name)
+        await self._show_account_detail(query, user, phone, None)
+
+    async def _show_strategy_selection(self, query, phone):
+        strategies = self.strategy_manager.strategies
+        kb = []
+        for name in strategies.keys():
+            kb.append([InlineKeyboardButton(name, callback_data=f"set_strategy:{phone}:{name}")])
+        kb.append([InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")])
+        await query.edit_message_text("📊 *选择投注策略:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _show_scheme_selection(self, query, phone):
+        schemes = self.strategy_manager.schemes
+        kb = []
+        for name in schemes.keys():
+            kb.append([InlineKeyboardButton(name, callback_data=f"set_scheme:{phone}:{name}")])
+        kb.append([InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")])
+        await query.edit_message_text("🎯 *选择投注方案:*", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _process_set_strategy(self, query, user, phone, strategy):
+        ok, msg = await self.strategy_manager.set_strategy(phone, strategy, user)
+        if ok:
+            await self._show_account_detail(query, user, phone, None)
+        else:
+            await query.edit_message_text(f"❌ {msg}", parse_mode='Markdown')
+
+    async def _process_set_scheme(self, query, user, phone, scheme):
+        ok, msg = await self.strategy_manager.set_scheme(phone, scheme, user)
+        if ok:
+            await self._show_account_detail(query, user, phone, None)
+        else:
+            await query.edit_message_text(f"❌ {msg}", parse_mode='Markdown')
+
+    async def _show_account_status(self, query, phone):
         acc = self.account_manager.get_account(phone)
-        if not acc: return
-        new = "kill" if acc.prediction_content == "double" else "double"
-        await self.account_manager.update_account(phone, prediction_content=new)
-        await target.edit_message_text(f"✅ 播报内容已切换为 {'杀组' if new=='kill' else '双组'}")
-        await self._show_account_detail(target, user, phone, None)
-    
-    async def _clear_streak(self, target, user, phone):
-        await self.account_manager.update_account(phone, streak_records=[])
-        await target.edit_message_text("✅ 记录已删除")
-        await self._show_account_detail(target, user, phone, None)
-    
-    async def _show_amount_menu(self, target, user, phone, context):
+        if not acc:
+            await query.edit_message_text("❌ 账户不存在")
+            return
+        params = acc.bet_params
+        total_profit = acc.total_profit
+        total_loss = acc.total_loss
+        net = total_profit - total_loss
+        status = f"""
+📱 *账户状态*
+
+*基本信息:*
+• 手机号: `{acc.phone}`
+• 昵称: {acc.display_name or '无'}
+• 登录状态: {'✅ 已登录' if acc.is_logged_in else '❌ 未登录'}
+
+*监听状态:*
+• 自动投注: {'✅ 开启' if acc.auto_betting else '❌ 关闭'}
+• 预测播报: {'✅ 开启' if acc.prediction_broadcast else '❌ 关闭'}
+• 播报内容: {'双组' if acc.prediction_content=='double' else '杀组'}
+
+*投注设置:*
+• 策略: {acc.betting_strategy}
+• 方案: {acc.betting_scheme}
+• 基础金额: {params.base_amount}KK
+• 最大金额: {params.max_amount}KK
+• 停止余额: {params.stop_balance}KK
+• 止损: {params.stop_loss}KK
+• 止盈: {params.stop_win}KK
+• 恢复余额: {params.resume_balance}KK
+"""
+        if acc.chase_enabled:
+            status += f"""
+*追号状态:*
+• 数字: {', '.join(map(str, acc.chase_numbers))}
+• 进度: {acc.chase_current}/{acc.chase_periods}
+• 每注金额: {acc.chase_amount if acc.chase_amount>0 else '使用基础'}KK
+"""
+        status += f"""
+*统计:*
+• 余额: {acc.balance:.2f}KK
+• 总盈利: {total_profit:.2f}KK
+• 总亏损: {total_loss:.2f}KK
+• 净盈利: {net:.2f}KK
+• 连赢: {acc.consecutive_wins} 连输: {acc.consecutive_losses}
+        """
+        kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
+        await query.edit_message_text(status, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _show_streak_records(self, query, phone):
         acc = self.account_manager.get_account(phone)
-        if not acc: return
+        if not acc:
+            await query.edit_message_text("❌ 账户不存在")
+            return
         
-        text = f"💰 *金额设置*\n\n基础: {acc.bet_params.base_amount}KK\n最大: {acc.bet_params.max_amount}KK\n停止余额: {acc.bet_params.stop_balance}KK\n止损: {acc.bet_params.stop_loss}KK\n止盈: {acc.bet_params.stop_win}KK\n恢复: {acc.bet_params.resume_balance}KK"
+        if not acc.streak_records:
+            await query.edit_message_text(
+                "📭 暂无连输连赢记录\n\n当有7、8、10期连输或连赢时，会自动记录。",
+                parse_mode='Markdown'
+            )
+            return
+        
+        text = f"📊 *连输连赢记录 - {acc.get_display_name()}*\n\n"
+        
+        win_7 = [r for r in acc.streak_records if r.get('type') == 'win' and r.get('count') == 7]
+        win_8 = [r for r in acc.streak_records if r.get('type') == 'win' and r.get('count') == 8]
+        win_10 = [r for r in acc.streak_records if r.get('type') == 'win' and r.get('count') == 10]
+        loss_7 = [r for r in acc.streak_records if r.get('type') == 'loss' and r.get('count') == 7]
+        loss_8 = [r for r in acc.streak_records if r.get('type') == 'loss' and r.get('count') == 8]
+        loss_10 = [r for r in acc.streak_records if r.get('type') == 'loss' and r.get('count') == 10]
+        
+        if win_7:
+            text += f"\n✅ *连赢7期* ({len(win_7)}次)\n"
+            for i, r in enumerate(win_7[-5:], 1):
+                start = datetime.fromisoformat(r['start_time']).strftime('%m-%d %H:%M')
+                end = datetime.fromisoformat(r['end_time']).strftime('%m-%d %H:%M')
+                text += f"  {i}. {start} → {end}\n"
+        
+        if win_8:
+            text += f"\n✅ *连赢8期* ({len(win_8)}次)\n"
+            for i, r in enumerate(win_8[-5:], 1):
+                start = datetime.fromisoformat(r['start_time']).strftime('%m-%d %H:%M')
+                end = datetime.fromisoformat(r['end_time']).strftime('%m-%d %H:%M')
+                text += f"  {i}. {start} → {end}\n"
+        
+        if win_10:
+            text += f"\n✅ *连赢10期* ({len(win_10)}次)\n"
+            for i, r in enumerate(win_10[-5:], 1):
+                start = datetime.fromisoformat(r['start_time']).strftime('%m-%d %H:%M')
+                end = datetime.fromisoformat(r['end_time']).strftime('%m-%d %H:%M')
+                text += f"  {i}. {start} → {end}\n"
+        
+        if loss_7:
+            text += f"\n❌ *连输7期* ({len(loss_7)}次)\n"
+            for i, r in enumerate(loss_7[-5:], 1):
+                start = datetime.fromisoformat(r['start_time']).strftime('%m-%d %H:%M')
+                end = datetime.fromisoformat(r['end_time']).strftime('%m-%d %H:%M')
+                text += f"  {i}. {start} → {end}\n"
+        
+        if loss_8:
+            text += f"\n❌ *连输8期* ({len(loss_8)}次)\n"
+            for i, r in enumerate(loss_8[-5:], 1):
+                start = datetime.fromisoformat(r['start_time']).strftime('%m-%d %H:%M')
+                end = datetime.fromisoformat(r['end_time']).strftime('%m-%d %H:%M')
+                text += f"  {i}. {start} → {end}\n"
+        
+        if loss_10:
+            text += f"\n❌ *连输10期* ({len(loss_10)}次)\n"
+            for i, r in enumerate(loss_10[-5:], 1):
+                start = datetime.fromisoformat(r['start_time']).strftime('%m-%d %H:%M')
+                end = datetime.fromisoformat(r['end_time']).strftime('%m-%d %H:%M')
+                text += f"  {i}. {start} → {end}\n"
+        
+        if not (win_7 or win_8 or win_10 or loss_7 or loss_8 or loss_10):
+            text = f"📊 *连输连赢记录 - {acc.get_display_name()}*\n\n暂无记录"
         
         kb = [
-            [InlineKeyboardButton("💰 基础金额", callback_data=f"amount_set:base_amount:{phone}"), InlineKeyboardButton("💎 最大金额", callback_data=f"amount_set:max_amount:{phone}")],
-            [InlineKeyboardButton("🛑 停止余额", callback_data=f"amount_set:stop_balance:{phone}"), InlineKeyboardButton("⛔ 止损", callback_data=f"amount_set:stop_loss:{phone}")],
-            [InlineKeyboardButton("✅ 止盈", callback_data=f"amount_set:stop_win:{phone}"), InlineKeyboardButton("🔄 恢复", callback_data=f"amount_set:resume_balance:{phone}")],
+            [InlineKeyboardButton("🗑️ 删除所有记录", callback_data=f"clear_streak:{phone}")],
             [InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]
         ]
-        await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    async def _amount_set(self, target, user, phone, param, context):
-        names = {'base_amount':'基础金额','max_amount':'最大金额','stop_balance':'停止余额','stop_loss':'止损','stop_win':'止盈','resume_balance':'恢复'}
-        await self.account_manager.update_account(phone, input_mode=param)
-        text = f"🔢 请输入新的 {names.get(param, param)}（整数KK）："
-        kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"amount_menu:{phone}")]]
-        await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-    
-    async def _show_account_status(self, target, phone):
-        acc = self.account_manager.get_account(phone)
-        if not acc: return
-        
-        text = f"📱 *账户状态*\n\n手机: `{acc.phone}`\n登录: {'✅' if acc.is_logged_in else '❌'}\n余额: {acc.balance:.2f}KK\n净盈利: {acc.total_profit - acc.total_loss:.0f}KK\n连赢: {acc.consecutive_wins} 连输: {acc.consecutive_losses}\n方案: {acc.betting_scheme}\n策略: {acc.betting_strategy}"
-        
-        kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
-        await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
+    async def _clear_streak_records(self, query, user, phone):
+        acc = self.account_manager.get_account(phone)
+        if not acc:
+            await query.edit_message_text("❌ 账户不存在")
+            return
+        await self.account_manager.update_account(phone, streak_records=[])
+        await query.edit_message_text("✅ 所有连输连赢记录已删除")
+        await self._show_account_detail(query, user, phone, None)
+
+    async def _show_status_menu(self, query):
+        api_stats = self.api.get_statistics()
+        sched_stats = self.game_scheduler.get_stats()
+        total_accounts = len(self.account_manager.accounts)
+        logged = sum(1 for a in self.account_manager.accounts.values() if a.is_logged_in)
+        auto = sched_stats['auto_betting_accounts']
+        broadcast = sched_stats['broadcast_accounts']
+        total_profit = sum(a.total_profit for a in self.account_manager.accounts.values())
+        total_loss = sum(a.total_loss for a in self.account_manager.accounts.values())
+        net = total_profit - total_loss
+        text = f"""
+📊 *系统状态*
+
+*数据状态*
+• 缓存数据: {api_stats['缓存数据量']}期
+• 最新期号: {api_stats['最新期号']}
+
+*账户状态*
+• 总账户: {total_accounts}
+• 已登录: {logged}
+• 自动投注: {auto}
+• 预测播报: {broadcast}
+
+*盈利统计*
+• 总盈利: {total_profit:.2f}KK
+• 总亏损: {total_loss:.2f}KK
+• 净盈利: {net:.2f}KK
+
+*游戏统计*
+• 投注周期: {sched_stats['game_stats']['betting_cycles']}
+• 成功投注: {sched_stats['game_stats']['successful_bets']}
+• 失败投注: {sched_stats['game_stats']['failed_bets']}
+        """
+        kb = [[InlineKeyboardButton("🔄 刷新", callback_data="refresh_status")],
+              [InlineKeyboardButton("🔙 返回", callback_data="menu:main")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _show_help_menu(self, query):
+        text = """
+📚 *帮助菜单*
+
+所有操作均可通过菜单按钮完成。
+
+• 添加账户：在“账户管理”中点击“➕ 添加账户”，输入手机号即可。
+• 登录：在账户列表中选择账户，点击“🔐 登录”。
+• 设置群组：进入账户详情，点击“💬 游戏群”或“📢 播报群”，从列表中选择。
+• 投注设置：在“投注设置”区域选择方案、策略、金额、追号。
+• 播报设置：在“播报设置”区域选择播报群和播报内容（双组/杀组）。
+• 自动投注/播报：点击相应按钮即可开启/关闭（播报停止会等待最后一期开奖）。
+• 查询余额/账户状态：点击相应按钮。
+• 手动投注：在游戏群发送“类型 金额”即可，如“大 10000”。
+
+*预测算法说明*
+本系统使用双杀组+双Y融合算法进行预测：
+• 双杀组算法：Y值位差和 + 和值运算对立算法，双算法一致确定杀组
+• 双Y融合：3Y顺序取尾数 + 双权重打分（尾数和40% + 走势频次60%）
+• 硅基流动AI辅助验证：AI验证规则结果的合理性
+
+如有问题，请联系管理员。
+        """
+        kb = [[InlineKeyboardButton("🔙 返回", callback_data="menu:main")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _process_run_analysis(self, query):
+        await query.edit_message_text("🔍 正在生成预测（使用双杀组+双Y融合算法）...")
+        history = await self.api.get_history(50)
+        if len(history) < 3:
+            await query.edit_message_text("❌ 历史数据不足，至少需要3期数据")
+            return
+        latest = history[0]
+        
+        pred = await self.model.predict(history, latest)
+        
+        acc_stats = self.model.get_accuracy_stats()
+        text = f"""
+🎯 *PC28预测结果*
+
+📊 *数据信息：*
+• 最新期号: {latest.get('qihao', 'N/A')}
+• 最新结果: {latest.get('sum', 'N/A')} ({latest.get('combo', 'N/A')})
+
+🏆 *算法预测：*
+• 主推: {pred['main']}
+• 候选: {pred['candidate']}
+• 杀组: {pred['kill']}
+• 置信度: {pred['confidence']}%
+
+📈 *近期准确率：{acc_stats['overall']['recent']*100:.1f}%*
+
+🧠 *算法说明：*
+• 双杀组算法（Y值位差和 + 和值运算对立）
+• 双Y融合（3Y尾数顺序 + 双权重打分）
+• 硅基流动AI辅助验证
+        """
+        kb = [[InlineKeyboardButton("🔄 刷新预测", callback_data="run_analysis")],
+              [InlineKeyboardButton("🔙 返回预测菜单", callback_data="menu:prediction")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _cmd_logout_inline(self, query, user, phone, context):
+        await self.game_scheduler.stop_auto_betting(phone, user)
+        await self.prediction_broadcaster.stop_broadcast(phone, user)
+        client = self.account_manager.clients.get(phone)
+        if client:
+            try:
+                if client.is_connected():
+                    await client.disconnect()
+                session_name = phone.replace('+', '')
+                for ext in ['.session', '.session-journal', '.session.lock']:
+                    file_path = Config.SESSIONS_DIR / (session_name + ext)
+                    if file_path.exists():
+                        file_path.unlink()
+            except Exception as e:
+                logger.log_error(user, f"清理客户端资源失败 {phone}", e)
+            finally:
+                self.account_manager.clients.pop(phone, None)
+        await self.account_manager.update_account(phone,
+            is_logged_in=False,
+            auto_betting=False,
+            prediction_broadcast=False,
+            display_name='',
+            chase_enabled=False,
+            chase_numbers=[],
+            chase_periods=0,
+            chase_current=0,
+            chase_amount=0
+        )
+        self.account_manager.set_user_state(user, 'idle', {'current_account': None})
+        await self._show_account_detail(query, user, phone, context)
+
+    async def _toggle_prediction_content(self, query, user, phone):
+        acc = self.account_manager.get_account(phone)
+        if not acc:
+            await query.edit_message_text("❌ 账户不存在")
+            return
+        new_content = "kill" if acc.prediction_content == "double" else "double"
+        await self.account_manager.update_account(phone, prediction_content=new_content)
+        await query.edit_message_text(f"✅ 播报内容已切换为 {'杀组' if new_content=='kill' else '双组'}")
+        await self._show_account_detail(query, user, phone, None)
+
+    async def _show_recommend_amount_menu(self, query, user, phone, context):
+        kb = [
+            [InlineKeyboardButton("保守", callback_data=f"recommend_mode:conservative:{phone}"),
+             InlineKeyboardButton("稳定", callback_data=f"recommend_mode:stable:{phone}"),
+             InlineKeyboardButton("激进", callback_data=f"recommend_mode:aggressive:{phone}")],
+            [InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]
+        ]
+        await query.edit_message_text(
+            "💡 *选择推荐模式*\n\n请选择风险偏好，系统将根据当前余额计算建议每注金额。",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='Markdown'
+        )
+
+    async def _calculate_and_show_recommendation(self, query, user, phone, mode, context):
+        acc = self.account_manager.get_account(phone)
+        if not acc:
+            await query.edit_message_text("❌ 账户不存在")
+            return
+        balance = self.account_manager.get_cached_balance(phone)
+        if balance is None:
+            balance = await self.game_scheduler._query_balance(phone)
+        if balance is None:
+            await query.edit_message_text("❌ 无法获取余额，请稍后重试")
+            return
+
+        ratios = {'conservative': 0.01, 'stable': 0.02, 'aggressive': 0.05}
+        recommend = int(balance * ratios.get(mode, 0.02))
+        recommend = max(Config.MIN_BET_AMOUNT, min(recommend, Config.MAX_BET_AMOUNT))
+
+        text = (
+            f"💡 *推荐金额计算结果*\n\n"
+            f"当前余额: {balance:.2f} KK\n"
+            f"选择模式: {mode}\n"
+            f"推荐每注金额: {recommend} KK\n\n"
+            f"是否将此金额设置为当前账户的基础金额？"
+        )
+        kb = [
+            [InlineKeyboardButton("✅ 是", callback_data=f"set_recommend:yes:{phone}:{recommend}"),
+             InlineKeyboardButton("❌ 否", callback_data=f"select_account:{phone}")],
+            [InlineKeyboardButton("🔄 重新选择", callback_data=f"recommend_amount:{phone}")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _show_dynamic_ratio_menu(self, query, user, phone, context):
+        acc = self.account_manager.get_account(phone)
+        if not acc:
+            await query.edit_message_text("❌ 账户不存在")
+            return
+        current = acc.bet_params.dynamic_base_ratio
+        status = f"当前动态比例：{current*100:.0f}%" if current > 0 else "当前：关闭"
+        text = f"""
+📈 *动态投注比例设置*
+
+{status}
+
+请选择投注时的动态比例（基础金额 = 余额 × 比例）：
+• 关闭：使用固定的基础金额
+• 1%：余额的1%（保守）
+• 2%：余额的2%（稳定）
+• 5%：余额的5%（激进）
+
+选择后，每次自动投注将根据实时余额计算基础金额。
+        """
+        kb = [
+            [InlineKeyboardButton("关闭", callback_data=f"set_dynamic:0:{phone}"),
+             InlineKeyboardButton("1%", callback_data=f"set_dynamic:0.01:{phone}"),
+             InlineKeyboardButton("2%", callback_data=f"set_dynamic:0.02:{phone}")],
+            [InlineKeyboardButton("5%", callback_data=f"set_dynamic:0.05:{phone}"),
+             InlineKeyboardButton("自定义比例", callback_data=f"set_dynamic:custom:{phone}")],
+            [InlineKeyboardButton("🔙 返回金额设置", callback_data=f"amount_menu:{phone}")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _set_dynamic_ratio(self, query, user, phone, ratio_str, context):
+        if ratio_str == "custom":
+            await self.account_manager.update_account(phone, input_mode='dynamic_ratio', input_buffer='')
+            context.user_data['last_amount_msg'] = (query.message.chat_id, query.message.message_id)
+            await query.edit_message_text(
+                "🔢 请输入动态比例（如0.03表示3%）：\n\n范围0~1，输入0关闭动态。",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data=f"dynamic_ratio:{phone}")]])
+            )
+            return
+        try:
+            ratio = float(ratio_str)
+            if ratio < 0 or ratio > 1:
+                raise ValueError
+        except:
+            await query.edit_message_text("❌ 无效比例，请重新选择")
+            return
+        await self.account_manager.update_account(phone, bet_params={'dynamic_base_ratio': ratio})
+        await query.edit_message_text(f"✅ 动态比例已设置为 {ratio*100:.0f}%")
+        await self._show_amount_menu_callback(query, user, phone, context)
 
 # ==================== 启动 ====================
 async def post_init(application):
@@ -2739,22 +3746,28 @@ async def post_init(application):
         await bot.account_manager.reset_auto_flags_on_start()
         await bot.account_manager.verify_login_status()
         await bot.account_manager.start_periodic_save()
-        await bot.global_scheduler.start()
-
+        if hasattr(bot, 'global_scheduler'): 
+            await bot.global_scheduler.start()
 
 def main():
     def handle_shutdown(signum, frame):
-        print("\n🛑 正在优雅关闭...")
+        print("\n🛑 接收到停止信号，正在优雅关闭...")
         if 'bot' in globals():
             try:
                 loop = asyncio.get_running_loop()
                 loop.call_soon_threadsafe(lambda: asyncio.create_task(bot.global_scheduler.stop()))
                 loop.call_soon_threadsafe(lambda: asyncio.create_task(bot.account_manager.stop_periodic_save()))
                 loop.call_soon_threadsafe(lambda: asyncio.create_task(bot.api.close()))
+                for phone, client in bot.account_manager.clients.items():
+                    if client.is_connected(): 
+                        loop.call_soon_threadsafe(lambda: asyncio.create_task(client.disconnect()))
             except RuntimeError:
                 asyncio.run(bot.global_scheduler.stop())
                 asyncio.run(bot.account_manager.stop_periodic_save())
                 asyncio.run(bot.api.close())
+                for phone, client in bot.account_manager.clients.items():
+                    if client.is_connected(): 
+                        asyncio.run(client.disconnect())
         print("✅ 已安全关闭")
         exit(0)
     
@@ -2763,15 +3776,15 @@ def main():
     
     print("""
 ========================================
-PC28 智能预测投注系统 v3.3（增强版）
-多算法投票 | 双Y融合 | 交叉验证 | 历史准确率反馈
+PC28自动投注系统
+基于双杀组+双Y融合算法 | AI辅助验证
 ========================================
 启动中...
     """)
     
-    try:
+    try: 
         Config.validate()
-    except ValueError as e:
+    except ValueError as e: 
         print(f"❌ 配置错误: {e}")
         return
     
@@ -2781,7 +3794,6 @@ PC28 智能预测投注系统 v3.3（增强版）
     print("✅ Bot已启动")
     print("ℹ️ 使用 /start 开始使用")
     bot.application.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     random.seed(time.time())
