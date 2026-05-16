@@ -36,6 +36,9 @@ class Config:
     API_HASH = os.getenv("API_HASH")
     PC28_API_BASE = "https://www.pc28.help/api/kj.json?nbr=200"
     ADMIN_USER_IDS = [7673012566]
+    
+    SILICONFLOW_API_KEY = os.environ.get('SILICONFLOW_API_KEY', 'sk-vipzurajvbmxqdnqffipqcfvfuquklhyudcwarjhqyitjpcp')
+    SILICONFLOW_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
     DATA_DIR = Path("data")
     SESSIONS_DIR = DATA_DIR / "sessions"
     LOGS_DIR = DATA_DIR / "logs"
@@ -554,9 +557,9 @@ class ModelManager:
                 "candidate": candidate,
                 "kill": kill,
                 "confidence": min(95, max(40, confidence)),
-                "algo_details": prediction.get('algo_details', []),
-                "best_algorithm": prediction.get('best_algorithm', 'N/A'),
-                "best_score": prediction.get('best_score', 'N/A'),
+                "algo_details": rule_result.get('algo_details', []) if rule_result else [],
+                "best_algorithm": rule_result.get('best_algorithm', 'N/A') if rule_result else 'N/A',
+                "best_score": rule_result.get('best_score', 'N/A') if rule_result else 'N/A',
                 "trend_analysis": {}
             }
             if qihao:
