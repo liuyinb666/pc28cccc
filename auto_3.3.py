@@ -36,7 +36,6 @@ class Config:
     API_HASH = os.getenv("API_HASH")
     PC28_API_BASE = "https://www.pc28.help/api/kj.json?nbr=200"
     ADMIN_USER_IDS = [7673012566]
-    
     DATA_DIR = Path("data")
     SESSIONS_DIR = DATA_DIR / "sessions"
     LOGS_DIR = DATA_DIR / "logs"
@@ -234,499 +233,261 @@ SUM_TO_COMBO = {
     21: "大单", 22: "大双", 23: "大单", 24: "大双", 25: "大单", 26: "大双", 27: "大单"
 }
 
+# ==================== 东京JND28预测器（4算法评分选优机制） ====================
+class TokyoPredictor:
+    """
+    基于东京JND28的4算法评分选优预测器
+    算法列表：天子算法、走势算法、3y算法、5Y算法
+    核心机制：回测最近30期，选命中率最高的算法进行预测
+    """
 
-# ==================== PC28 500策略杀组预测模型 ====================
-class PC28Predictor500:
-    """
-    500策略杀组预测模型
-    通过参数变化自动生成500种不同策略
-    """
-    
+    COMBOS = ["大单", "大双", "小单", "小双"]
+    KILL_MAP = {
+        '大双': '杀小单',
+        '小双': '杀大单',
+        '大单': '杀小双',
+        '小单': '杀大双'
+    }
+    OPPOSITE = {
+        '大': '小', '小': '大',
+        '单': '双', '双': '单'
+    }
+
     def __init__(self):
-        self.combos = COMBOS
-        self.strategies = []
-        self._generate_500_strategies()
-    
-    def _generate_500_strategies(self):
-        """生成500个策略"""
-        strategy_id = 0
-        
-        # ========== 1. 频率分析类 - 杀高频 (50个) ==========
-        for window in range(5, 55, 1):
-            strategy_id += 1
-            self.strategies.append((
-                f"频率杀高{window}期",
-                lambda records, w=window: self._freq_kill_high(records, w)
-            ))
-        
-        # ========== 2. 频率分析类 - 杀低频 (50个) ==========
-        for window in range(5, 55, 1):
-            strategy_id += 1
-            self.strategies.append((
-                f"频率杀低{window}期",
-                lambda records, w=window: self._freq_kill_low(records, w)
-            ))
-        
-        # ========== 3. 遗漏分析类 - 杀长遗漏 (50个) ==========
-        for window in range(10, 60, 1):
-            strategy_id += 1
-            self.strategies.append((
-                f"遗漏杀长{window}期",
-                lambda records, w=window: self._skip_kill_long(records, w)
-            ))
-        
-        # ========== 4. 遗漏分析类 - 杀短遗漏 (30个) ==========
-        for window in range(10, 40, 1):
-            strategy_id += 1
-            self.strategies.append((
-                f"遗漏杀短{window}期",
-                lambda records, w=window: self._skip_kill_short(records, w)
-            ))
-        
-        # ========== 5. 连号分析类 (40个) ==========
-        for threshold in range(2, 6):
-            for window in range(10, 30, 5):
-                strategy_id += 1
-                self.strategies.append((
-                    f"连号杀{threshold}连{window}期",
-                    lambda records, t=threshold, w=window: self._streak_kill(records, t, w)
-                ))
-        
-        # ========== 6. 转移概率类 (40个) ==========
-        for window in range(10, 50, 1):
-            strategy_id += 1
-            self.strategies.append((
-                f"转移概率{window}期",
-                lambda records, w=window: self._transition_kill(records, w)
-            ))
-        
-        # ========== 7. 均衡分析类 (40个) ==========
-        for window in range(10, 50, 1):
-            strategy_id += 1
-            self.strategies.append((
-                f"均衡偏离{window}期",
-                lambda records, w=window: self._balance_kill(records, w)
-            ))
-        
-        # ========== 8. 趋势分析类 (40个) ==========
-        for window in range(10, 50, 1):
-            strategy_id += 1
-            self.strategies.append((
-                f"趋势分析{window}期",
-                lambda records, w=window: self._trend_kill(records, w)
-            ))
-        
-        # ========== 9. 周期分析类 (40个) ==========
-        for window in range(20, 60, 1):
-            strategy_id += 1
-            self.strategies.append((
-                f"周期分析{window}期",
-                lambda records, w=window: self._period_kill(records, w)
-            ))
-        
-        # ========== 10. 马尔可夫类 (30个) ==========
-        for order in [1, 2, 3]:
-            for window in range(20, 50, 5):
-                strategy_id += 1
-                self.strategies.append((
-                    f"马尔可夫{order}阶{window}期",
-                    lambda records, o=order, w=window: self._markov_kill(records, o, w)
-                ))
-        
-        # ========== 11. 加权频率类 (50个) ==========
-        weight_types = ['linear', 'exp', 'log', 'sqrt', 'inverse']
-        for wt in weight_types:
-            for window in range(10, 60, 10):
-                strategy_id += 1
-                self.strategies.append((
-                    f"加权{wt}{window}期",
-                    lambda records, w=window, t=wt: self._weighted_freq_kill(records, w, t)
-                ))
-        
-        # ========== 12. 组合回避类 (40个) ==========
-        for window in range(10, 50, 1):
-            strategy_id += 1
-            self.strategies.append((
-                f"组合回避{window}期",
-                lambda records, w=window: self._pair_avoid_kill(records, w)
-            ))
-        
-        # ========== 13. 反向杀组类 (40个) ==========
-        for period in range(1, 11):
-            for mode in ['exact', 'similar']:
-                strategy_id += 1
-                self.strategies.append((
-                    f"反向{period}期{mode}",
-                    lambda records, p=period, m=mode: self._anti_period_kill(records, p, m)
-                ))
-        
-        # ========== 14. 混合策略类 (剩余) ==========
-        for w1 in range(10, 30, 5):
-            for w2 in range(10, 30, 5):
-                if len(self.strategies) < 500:
-                    strategy_id += 1
-                    self.strategies.append((
-                        f"混合频遗{w1}_{w2}",
-                        lambda records, a=w1, b=w2: self._mixed_freq_skip(records, a, b)
-                    ))
-        
-        for w1 in range(10, 30, 5):
-            for w2 in range(10, 30, 5):
-                if len(self.strategies) < 500:
-                    strategy_id += 1
-                    self.strategies.append((
-                        f"混合频趋{w1}_{w2}",
-                        lambda records, a=w1, b=w2: self._mixed_freq_trend(records, a, b)
-                    ))
-        
-        for w1 in range(10, 30, 5):
-            for w2 in range(10, 30, 5):
-                if len(self.strategies) < 500:
-                    strategy_id += 1
-                    self.strategies.append((
-                        f"混合遗转{w1}_{w2}",
-                        lambda records, a=w1, b=w2: self._mixed_skip_trans(records, a, b)
-                    ))
-        
-        while len(self.strategies) < 500:
-            idx = len(self.strategies)
-            w = 10 + (idx % 40)
-            self.strategies.append((
-                f"兜底策略{idx}",
-                lambda records, window=w: self._freq_kill_high(records, window)
-            ))
-        
-        self.strategies = self.strategies[:500]
-    
-    def _get_combos(self, records):
-        """提取组合列表"""
-        return [r.get('combination', r.get('category', '小双')) for r in records]
-    
-    def _freq_kill_high(self, records, window):
-        """频率分析 - 杀高频"""
-        combos = self._get_combos(records[:window])
-        freq = Counter(combos)
-        for c in self.combos:
-            if c not in freq:
-                freq[c] = 0
-        shazu = max(freq, key=freq.get)
-        return {'shazu': shazu, 'detail': f"高频{freq[shazu]}次"}
-    
-    def _freq_kill_low(self, records, window):
-        """频率分析 - 杀低频"""
-        combos = self._get_combos(records[:window])
-        freq = Counter(combos)
-        for c in self.combos:
-            if c not in freq:
-                freq[c] = 0
-        shazu = min(freq, key=freq.get)
-        return {'shazu': shazu, 'detail': f"低频{freq[shazu]}次"}
-    
-    def _skip_kill_long(self, records, window):
-        """遗漏分析 - 杀长遗漏"""
-        combos = self._get_combos(records[:window])
-        skip = {}
-        for c in self.combos:
-            try:
-                skip[c] = combos.index(c)
-            except ValueError:
-                skip[c] = window
-        shazu = max(skip, key=skip.get)
-        return {'shazu': shazu, 'detail': f"遗漏{skip[shazu]}期"}
-    
-    def _skip_kill_short(self, records, window):
-        """遗漏分析 - 杀短遗漏"""
-        combos = self._get_combos(records[:window])
-        skip = {}
-        for c in self.combos:
-            try:
-                skip[c] = combos.index(c)
-            except ValueError:
-                skip[c] = window
-        shazu = min(skip, key=skip.get)
-        return {'shazu': shazu, 'detail': f"遗漏{skip[shazu]}期"}
-    
-    def _streak_kill(self, records, threshold, window):
-        """连号分析"""
-        combos = self._get_combos(records[:window])
-        current_streak = 1
-        current_combo = combos[0] if combos else self.combos[0]
-        for i in range(1, min(len(combos), threshold + 5)):
-            if combos[i] == current_combo:
-                current_streak += 1
-            else:
-                break
-        if current_streak >= threshold:
-            shazu = current_combo
-        else:
-            freq = Counter(combos)
-            shazu = max(freq, key=freq.get) if freq else self.combos[0]
-        return {'shazu': shazu, 'detail': f"连续{current_streak}期"}
-    
-    def _transition_kill(self, records, window):
-        """转移概率分析"""
-        combos = self._get_combos(records[:window])
-        transition = defaultdict(Counter)
-        for i in range(len(combos) - 1):
-            transition[combos[i]][combos[i+1]] += 1
-        last_combo = combos[0] if combos else self.combos[0]
-        trans_freq = transition.get(last_combo, Counter())
-        for c in self.combos:
-            if c not in trans_freq:
-                trans_freq[c] = 0
-        shazu = min(trans_freq, key=trans_freq.get)
-        return {'shazu': shazu, 'detail': "转移概率最低"}
-    
-    def _balance_kill(self, records, window):
-        """均衡分析"""
-        combos = self._get_combos(records[:window])
-        freq = Counter(combos)
-        expected = window / 4
-        deviation = {c: freq.get(c, 0) - expected for c in self.combos}
-        shazu = max(deviation, key=deviation.get)
-        return {'shazu': shazu, 'detail': f"偏离{deviation[shazu]:.1f}"}
-    
-    def _trend_kill(self, records, window):
-        """趋势分析"""
-        combos = self._get_combos(records[:window])
-        trend = {}
-        recent_len = min(5, len(combos) // 2) if combos else 1
-        for c in self.combos:
-            recent_count = combos[:recent_len].count(c)
-            prev_count = combos[recent_len:recent_len*2].count(c)
-            trend[c] = recent_count - prev_count
-        shazu = max(trend, key=trend.get)
-        return {'shazu': shazu, 'detail': f"趋势{trend[shazu]}"}
-    
-    def _period_kill(self, records, window):
-        """周期分析"""
-        combos = self._get_combos(records[:window])
-        intervals = {c: [] for c in self.combos}
-        last_pos = {c: -1 for c in self.combos}
-        for i, c in enumerate(combos):
-            if last_pos[c] >= 0:
-                intervals[c].append(i - last_pos[c])
-            last_pos[c] = i
-        avg_interval = {}
-        for c in self.combos:
-            if intervals[c]:
-                avg_interval[c] = sum(intervals[c]) / len(intervals[c])
-            else:
-                avg_interval[c] = window
-        current_skip = {}
-        for c in self.combos:
-            try:
-                current_skip[c] = combos.index(c)
-            except ValueError:
-                current_skip[c] = window
-        diff = {c: abs(current_skip[c] - avg_interval[c]) for c in self.combos}
-        shazu = min(diff, key=diff.get)
-        return {'shazu': shazu, 'detail': "周期接近"}
-    
-    def _markov_kill(self, records, order, window):
-        """马尔可夫链分析"""
-        combos = self._get_combos(records[:window])
-        if len(combos) < order + 1:
-            return {'shazu': self.combos[0], 'detail': "数据不足"}
-        if order == 1:
-            transition = defaultdict(Counter)
-            for i in range(len(combos) - 1):
-                transition[combos[i]][combos[i+1]] += 1
-            current_state = combos[0]
-            trans_freq = transition.get(current_state, Counter())
-        elif order == 2:
-            transition = defaultdict(Counter)
-            for i in range(len(combos) - 2):
-                state = (combos[i], combos[i+1])
-                transition[state][combos[i+2]] += 1
-            current_state = (combos[0], combos[1]) if len(combos) > 1 else (combos[0], combos[0])
-            trans_freq = transition.get(current_state, Counter())
-        else:
-            transition = defaultdict(Counter)
-            for i in range(len(combos) - 3):
-                state = (combos[i], combos[i+1], combos[i+2])
-                transition[state][combos[i+3]] += 1
-            current_state = (combos[0], combos[1], combos[2]) if len(combos) > 2 else (combos[0], combos[0], combos[0])
-            trans_freq = transition.get(current_state, Counter())
-        for c in self.combos:
-            if c not in trans_freq:
-                trans_freq[c] = 0
-        shazu = min(trans_freq, key=trans_freq.get)
-        return {'shazu': shazu, 'detail': f"{order}阶马尔可夫"}
-    
-    def _weighted_freq_kill(self, records, window, weight_type):
-        """加权频率分析"""
-        import math
-        combos = self._get_combos(records[:window])
-        weights = {}
-        for i, c in enumerate(combos):
-            if weight_type == 'linear':
-                weight = window - i
-            elif weight_type == 'exp':
-                weight = math.exp(-i / window)
-            elif weight_type == 'log':
-                weight = 1 / (1 + math.log(i + 2))
-            elif weight_type == 'sqrt':
-                weight = 1 / math.sqrt(i + 1)
-            else:
-                weight = 1 / (i + 1)
-            if c not in weights:
-                weights[c] = 0
-            weights[c] += weight
-        for c in self.combos:
-            if c not in weights:
-                weights[c] = 0
-        shazu = max(weights, key=weights.get)
-        return {'shazu': shazu, 'detail': f"加权{weight_type}"}
-    
-    def _pair_avoid_kill(self, records, window):
-        """组合回避分析"""
-        combos = self._get_combos(records[:window])
-        pairs = Counter()
-        for i in range(len(combos) - 1):
-            pairs[(combos[i], combos[i+1])] += 1
-        last = combos[0] if combos else self.combos[0]
-        next_freq = {c: 0 for c in self.combos}
-        for (a, b), count in pairs.items():
-            if a == last:
-                next_freq[b] = count
-        shazu = min(next_freq, key=next_freq.get)
-        return {'shazu': shazu, 'detail': "组合回避"}
-    
-    def _anti_period_kill(self, records, period, mode):
-        """反向杀组"""
-        if len(records) <= period:
-            return {'shazu': self.combos[0], 'detail': "数据不足"}
-        if mode == 'exact':
-            shazu = records[period].get('combination', records[period].get('category', '小双'))
-        else:
-            target = records[period].get('combination', records[period].get('category', '小双'))
-            freq = Counter(self._get_combos(records[:20]))
-            candidates = {c: f for c, f in freq.items() if c != target}
-            shazu = max(candidates, key=candidates.get) if candidates else target
-        return {'shazu': shazu, 'detail': f"反向{period}期"}
-    
-    def _mixed_freq_skip(self, records, w1, w2):
-        """混合策略: 频率+遗漏"""
-        freq_result = self._freq_kill_high(records, w1)
-        skip_result = self._skip_kill_long(records, w2)
-        if freq_result['shazu'] == skip_result['shazu']:
-            return {'shazu': freq_result['shazu'], 'detail': "频遗一致"}
-        return skip_result
-    
-    def _mixed_freq_trend(self, records, w1, w2):
-        """混合策略: 频率+趋势"""
-        freq_result = self._freq_kill_high(records, w1)
-        trend_result = self._trend_kill(records, w2)
-        if freq_result['shazu'] == trend_result['shazu']:
-            return {'shazu': freq_result['shazu'], 'detail': "频趋一致"}
-        return freq_result
-    
-    def _mixed_skip_trans(self, records, w1, w2):
-        """混合策略: 遗漏+转移"""
-        skip_result = self._skip_kill_long(records, w1)
-        trans_result = self._transition_kill(records, w2)
-        if skip_result['shazu'] == trans_result['shazu']:
-            return {'shazu': skip_result['shazu'], 'detail': "遗转一致"}
-        return trans_result
-    
-    def validate_accuracy(self, records, strategy_func, test_periods=20):
-        """验证策略准确率"""
-        min_required = test_periods + 10  # 降低门槛：至少30条数据即可
-        if len(records) < min_required:
+        self.combos = self.COMBOS
+        self.consecutive_loss = 0
+        self.max_consecutive_loss = 1
+
+    def get_category(self, total: int) -> str:
+        """和值转组合"""
+        size = "大" if total >= 14 else "小"
+        oe = "单" if total % 2 == 1 else "双"
+        return size + oe
+
+    def _get_kill_by_shape(self, shape: str) -> str:
+        """根据形态返回杀组"""
+        return self.KILL_MAP.get(shape, '杀大单')
+
+    # ---------- 天子算法 ----------
+    def _compute_main_algorithm(self, data: list, index: int):
+        """
+        天子算法（主算法）
+        取当前期和前10期的号码，通过公式计算杀组
+        """
+        if index + 10 >= len(data):
             return None
-        correct = 0
-        total = 0
-        for i in range(test_periods):
-            test_records = records[i+1:]
-            actual = records[i].get('combination', records[i].get('category', '小双'))
-            try:
-                prediction = strategy_func(test_records)
-                shazu = prediction['shazu']
-                if actual != shazu:
-                    correct += 1
-                total += 1
-            except:
-                pass
-        return correct / total if total > 0 else 0
-    
-    def predict(self, history, top_n=100):
-        """主预测函数 - 使用500策略自动选优"""
-        processed = []
-        for r in history:
-            p = r.copy()
-            if 'combination' not in p:
-                if 'category' in p:
-                    p['combination'] = p['category']
-                elif 'num' in p or 'total' in p:
-                    total = p.get('num', p.get('total', 0))
-                    try:
-                        total = int(total)
-                    except:
-                        total = 0
-                    size = "大" if total >= 14 else "小"
-                    parity = "单" if total % 2 == 1 else "双"
-                    p['combination'] = size + parity
-                else:
-                    p['combination'] = "小双"
-            processed.append(p)
-        
-        results = []
-        for name, func in self.strategies:
-            acc = self.validate_accuracy(processed, func, 20)
-            if acc is not None:
-                pred = func(processed)
-                results.append({
-                    'name': name,
-                    'accuracy': acc,
-                    'shazu': pred['shazu'],
-                    'detail': pred['detail']
-                })
-        
-        results.sort(key=lambda x: x['accuracy'], reverse=True)
-        best = results[0] if results else None
-        
-        # 扩大投票范围到Top100，增加多样性
-        top_results = results[:top_n]
-        votes = Counter([r['shazu'] for r in top_results])
-        vote_shazu = votes.most_common(1)[0][0] if votes else self.combos[0]
-        
-        # 最优策略和投票不一致时，使用最优策略（准确率>=80%时）
-        if best and best['accuracy'] >= 0.80:
-            final_shazu = best['shazu']
-            confidence = int(best['accuracy'] * 100)
+        cur = data[index]
+        back10 = data[index + 10]
+        if not cur or not back10:
+            return None
+
+        a = cur.get('a', cur.get('nums', [0,0,0])[0] if isinstance(cur.get('nums'), list) else 0)
+        b = cur.get('b', cur.get('nums', [0,0,0])[1] if isinstance(cur.get('nums'), list) else 0)
+        c = cur.get('c', cur.get('nums', [0,0,0])[2] if isinstance(cur.get('nums'), list) else 0)
+        s = a + b + c
+
+        if s == 0:
+            return '杀大单'
+
+        back10_nums = back10.get('nums', [back10.get('a',0), back10.get('b',0), back10.get('c',0)])
+        if isinstance(back10_nums, list) and len(back10_nums) >= 2:
+            back10_b = back10_nums[1]
         else:
-            final_shazu = vote_shazu
-            confidence = 75
-        
-        remaining = [c for c in self.combos if c != final_shazu]
-        recent = processed[:30]
-        combo_freq = Counter([r['combination'] for r in recent])
-        remaining_sorted = sorted(remaining, key=lambda x: combo_freq.get(x, 0), reverse=True)
-        
-        main = remaining_sorted[0] if remaining_sorted else remaining[0]
-        candidate = remaining_sorted[1] if len(remaining_sorted) > 1 else remaining[1]
-        
+            back10_b = back10.get('b', 0)
+
+        t = (a + c) * b + back10_b
+        r = t + (t // s if s != 0 else 0)
+
+        while r > 27:
+            r -= 28
+        if r < 0:
+            r = 0
+
+        shape = ('小' if r <= 13 else '大') + ('双' if r % 2 == 0 else '单')
+        return self._get_kill_by_shape(shape)
+
+    # ---------- 走势算法 ----------
+    def _compute_trend_algorithm(self, data: list, index: int):
+        """
+        走势算法
+        如果当前期和上一期形态相同，杀该形态；否则回退到天子算法
+        """
+        if index + 1 >= len(data):
+            return None
+        cur_combo = self.get_category(data[index].get('sum', data[index].get('total', 0)))
+        prev_combo = self.get_category(data[index + 1].get('sum', data[index + 1].get('total', 0)))
+        if cur_combo == prev_combo:
+            return '杀' + cur_combo
+        return self._compute_main_algorithm(data, index)
+
+    # ---------- 3y算法 ----------
+    def _compute_pattern_algorithm(self, data: list, index: int):
+        """
+        3y算法
+        直接杀上一期的形态
+        """
+        if index + 1 >= len(data):
+            return None
+        prev_combo = self.get_category(data[index + 1].get('sum', data[index + 1].get('total', 0)))
+        return '杀' + prev_combo
+
+    # ---------- 5Y算法 ----------
+    def _compute_5y_algorithm(self, data: list, index: int):
+        """
+        5Y算法
+        基于和值对5取余运算推导杀组
+        """
+        if index >= len(data):
+            return None
+        cur = data[index]
+        a = cur.get('a', cur.get('nums', [0,0,0])[0] if isinstance(cur.get('nums'), list) else 0)
+        b = cur.get('b', cur.get('nums', [0,0,0])[1] if isinstance(cur.get('nums'), list) else 0)
+        c = cur.get('c', cur.get('nums', [0,0,0])[2] if isinstance(cur.get('nums'), list) else 0)
+        s = a + b + c
+
+        base = ((b % 5 + 1) * (s % 5 + 1)) % 10
+        r = base * 3
+
+        shape = ('小' if r <= 13 else '大') + ('双' if r % 2 == 0 else '单')
+        return self._get_kill_by_shape(shape)
+
+    # ---------- 评分系统 ----------
+    def _evaluate_algorithms(self, data: list) -> list:
+        """
+        对4个算法分别回测最近30期，计算命中率
+        返回按命中率降序排列的算法列表
+        """
+        algorithms = [
+            {"name": "天子算法", "fn": self._compute_main_algorithm, "score": 0},
+            {"name": "走势算法", "fn": self._compute_trend_algorithm, "score": 0},
+            {"name": "3y算法", "fn": self._compute_pattern_algorithm, "score": 0},
+            {"name": "5Y算法", "fn": self._compute_5y_algorithm, "score": 0}
+        ]
+
+        for algo in algorithms:
+            hit = 0
+            total = 0
+            for i in range(min(30, len(data) - 1)):
+                kill = algo["fn"](data, i + 1)
+                if kill is None:
+                    continue
+                actual = self.get_category(data[i].get('sum', data[i].get('total', 0)))
+                killed = kill.replace('杀', '')
+                if actual != killed:
+                    hit += 1
+                total += 1
+            algo["score"] = hit / total if total > 0 else 0
+
+        algorithms.sort(key=lambda x: x["score"], reverse=True)
+        return algorithms
+
+    # ---------- 生成推荐组合 ----------
+    def _generate_recommend(self, kill: str) -> list:
+        """生成推荐组合（排除杀组后的前2个）"""
+        killed = kill.replace('杀', '')
+        available = [c for c in self.combos if c != killed]
+        return available[:2]
+
+    # ---------- 主预测方法 ----------
+    def get_rule_based_predictions(self, history: list) -> dict:
+        """
+        完整预测流程：
+        1. 评分选优
+        2. 用最优算法生成杀组
+        3. 生成推荐组合
+        """
+        if len(history) < 12:
+            logger.log_analysis(f"历史数据不足12期，当前{len(history)}期")
+            return None
+
+        # 处理历史数据格式
+        processed = []
+        for h in history[:50]:
+            item = h.copy()
+            # 确保有 sum 字段
+            if 'sum' not in item and 'total' in item:
+                item['sum'] = item['total']
+            elif 'sum' not in item and 'total' not in item:
+                continue
+            # 确保有 a, b, c 字段
+            if 'nums' in item and isinstance(item['nums'], list) and len(item['nums']) >= 3:
+                if 'a' not in item:
+                    item['a'] = item['nums'][0]
+                if 'b' not in item:
+                    item['b'] = item['nums'][1]
+                if 'c' not in item:
+                    item['c'] = item['nums'][2]
+            processed.append(item)
+
+        if len(processed) < 12:
+            logger.log_analysis(f"有效历史数据不足12期")
+            return None
+
+        # 评分选优
+        algorithms = self._evaluate_algorithms(processed)
+        best = algorithms[0]
+
+        # 用最优算法生成下期杀组
+        next_kill = best["fn"](processed, 0)
+        if next_kill is None:
+            # 回退到第二好的算法
+            for algo in algorithms[1:]:
+                next_kill = algo["fn"](processed, 0)
+                if next_kill:
+                    break
+        if next_kill is None:
+            next_kill = '杀' + random.choice(self.combos)
+
+        # 生成推荐组合
+        recommend = self._generate_recommend(next_kill)
+
+        # 杀组组合名（去掉"杀"前缀）
+        kill_combo = next_kill.replace('杀', '')
+
+        # 主推和候选
+        main = recommend[0] if len(recommend) > 0 else self.combos[0]
+        candidate = recommend[1] if len(recommend) > 1 else self.combos[1]
+
+        # 置信度 = 最优算法命中率 * 100
+        confidence = min(95, max(40, int(best["score"] * 100)))
+
+        # 算法详情
         algo_details = []
-        for i, r in enumerate(results[:10], 1):
+        for algo in algorithms:
             algo_details.append({
-                "name": r['name'],
-                "kill": r['shazu'],
-                "accuracy": f"{r['accuracy']*100:.1f}%"
+                "name": algo["name"],
+                "score": f"{algo['score']*100:.1f}%"
             })
-        
-        return {
-            "main": main,
-            "candidate": candidate,
-            "kill": final_shazu,
-            "confidence": min(95, max(40, confidence)),
-            "algo_details": algo_details,
-            "best_strategy": best['name'] if best else "投票法",
-            "best_accuracy": best['accuracy'] if best else 0,
-            "vote_result": dict(votes),
-            "total_strategies": len(self.strategies),
-            "valid_strategies": len(results)
+
+        result = {
+            'main': main,
+            'candidate': candidate,
+            'kill': kill_combo,
+            'kill_confidence': confidence,
+            'confidence': confidence,
+            'best_algorithm': best["name"],
+            'best_score': f"{best['score']*100:.1f}%",
+            'algo_details': algo_details,
+            'special_numbers': [],
+            'jump_risk': f"当前最优算法: {best['name']}，命中率: {best['score']*100:.1f}%，杀组: {next_kill}",
+            'scores': {c: 0 for c in self.combos}
         }
+
+        logger.log_prediction(0, "东京算法预测完成",
+                            f"最优算法:{best['name']}({best['score']*100:.1f}%) 主推:{main} 候选:{candidate} 杀组:{kill_combo} 置信度:{confidence}")
+
+        return result
+
+    def update_result(self, actual_kill_correct: bool):
+        """更新连错计数"""
+        if actual_kill_correct:
+            self.consecutive_loss = 0
+        else:
+            self.consecutive_loss += 1
+        logger.log_analysis(f"杀组结果更新: {'正确' if actual_kill_correct else '错误'}, 连错计数={self.consecutive_loss}")
+
+# 保留兼容别名
+PC28RulePredictor = TokyoPredictor
 
 # ==================== 模型管理器 ====================
 class ModelManager:
@@ -737,7 +498,7 @@ class ModelManager:
         self._predict_lock = asyncio.Lock()
         self._last_predict_result = None
         self._last_predict_qihao = None
-        self.predictor = PC28Predictor500()
+        self.rule_predictor = TokyoPredictor()
 
     async def save(self):
         async with self._save_lock:
@@ -756,16 +517,48 @@ class ModelManager:
         if qihao and self._last_predict_qihao == qihao and self._last_predict_result:
             logger.log_prediction(0, "使用缓存的预测结果", f"期号: {qihao}")
             return self._last_predict_result
-        
         async with self._predict_lock:
             if qihao and self._last_predict_qihao == qihao and self._last_predict_result:
                 return self._last_predict_result
-            
-            # 使用Pro版预测器
-            result = self.predictor.predict(history)
-            
-            logger.log_analysis(f"Pro版模型预测: 主推{result['main']}, 候选{result['candidate']}, 杀组{result['kill']}, 置信度{result['confidence']}")
-            
+            processed_history = []
+            for h in history:
+                processed = h.copy()
+                if 'category' not in processed and processed.get('total') is not None:
+                    processed['category'] = self.rule_predictor.get_category(processed.get('total', 0))
+                if 'total' not in processed and processed.get('sum') is not None:
+                    processed['total'] = processed.get('sum')
+                if 'combo' not in processed and processed.get('category') is not None:
+                    processed['combo'] = processed.get('category')
+                if 'sum' not in processed and processed.get('total') is not None:
+                    processed['sum'] = processed.get('total')
+                processed_history.append(processed)
+            rule_result = self.rule_predictor.get_rule_based_predictions(processed_history[:30])
+            if rule_result:
+                main = rule_result['main']
+                candidate = rule_result['candidate']
+                kill = rule_result['kill']
+                confidence = rule_result['confidence']
+                logger.log_analysis(f"东京算法预测: 主推{main}, 候选{candidate}, 杀组{kill}, 置信度{confidence}")
+            else:
+                main = random.choice(COMBOS)
+                candidate = random.choice([c for c in COMBOS if c != main])
+                kill = random.choice([c for c in COMBOS if c != main and c != candidate])
+                confidence = 50
+                logger.log_analysis("东京算法计算失败，使用随机兜底")
+            if main == candidate:
+                candidate = random.choice([c for c in COMBOS if c != main])
+            if main == kill or candidate == kill:
+                kill = random.choice([c for c in COMBOS if c != main and c != candidate])
+            result = {
+                "main": main,
+                "candidate": candidate,
+                "kill": kill,
+                "confidence": min(95, max(40, confidence)),
+                "algo_details": prediction.get('algo_details', []),
+                "best_algorithm": prediction.get('best_algorithm', 'N/A'),
+                "best_score": prediction.get('best_score', 'N/A'),
+                "trend_analysis": {}
+            }
             if qihao:
                 self._last_predict_qihao = qihao
                 self._last_predict_result = result
@@ -773,6 +566,7 @@ class ModelManager:
 
     async def learn(self, prediction: Dict, actual: str, qihao: str, sum_val: int):
         kill_correct = (actual != prediction.get('kill', ''))
+        self.rule_predictor.update_result(kill_correct)
         is_correct = (actual == prediction['main'] or actual == prediction['candidate'])
         record = {
             "time": datetime.now().isoformat(),
@@ -795,13 +589,14 @@ class ModelManager:
         total = sum(1 for r in self.prediction_history if r.get('correct', False)) / len(self.prediction_history) if self.prediction_history else 0
         return {
             'overall': {'recent': recent, 'total': total},
-            'algorithms': {'Pro版20策略模型': recent}
+            'algorithms': {'东京4算法评分选优': recent}
         }
 
     def clear_history(self):
         self.prediction_history = []
         self.recent_accuracy.clear()
         asyncio.create_task(self.save())
+
 # ==================== API模块（开奖数据） ====================
 class PC28API:
     def __init__(self):
@@ -1672,7 +1467,7 @@ class PredictionBroadcaster:
                     logger.log_error(0, "并发发送预测异常", res)
 
     def _update_cached_messages(self):
-        lines = ["🤖500策略杀组预测模型 ", "-"*30, "期号    主推候选  状态  和值"]
+        lines = ["🤖东京4算法评分选优 ", "-"*30, "期号    主推候选  状态  和值"]
         for p in self.global_predictions['predictions'][-15:]:
             q = p['qihao'][-4:] if len(p['qihao'])>=4 else p['qihao']
             combo_str = p['main'] + p['candidate']
@@ -1681,7 +1476,7 @@ class PredictionBroadcaster:
             lines.append(f"{q:4s}   {combo_str:4s}   {mark:2s}   {s:>2s}")
         self.global_predictions['cached_double_message'] = "AI双组预测\n```" + "\n".join(lines) + "\n```"
         
-        kill_lines = ["🤖500策略杀组预测", "-"*30, "期号    杀组    状态  和值"]
+        kill_lines = ["🤖AI杀组", "-"*30, "期号    杀组    状态  和值"]
         for p in self.global_predictions['predictions'][-15:]:
             q = p['qihao'][-4:] if len(p['qihao'])>=4 else p['qihao']
             kill = p.get('kill_group', '--')
@@ -2047,13 +1842,10 @@ class GameScheduler:
             current_qihao = latest.get('qihao')
             if acc.last_bet_period == current_qihao: 
                 return
-            # 使用API返回的时间作为基准，避免本地时区问题
-            api_now = latest.get('parsed_time', datetime.now())
-            next_open = api_now + timedelta(seconds=Config.GAME_CYCLE_SECONDS)
+            now = datetime.now()
+            next_open = latest['parsed_time'] + timedelta(seconds=Config.GAME_CYCLE_SECONDS)
             close_time = next_open - timedelta(seconds=Config.CLOSE_BEFORE_SECONDS)
-            # 计算距离封盘还有多少秒（基于API时间）
-            seconds_to_close = (close_time - api_now).total_seconds()
-            if seconds_to_close <= 0: 
+            if now >= close_time: 
                 logger.log_betting(0, "已封盘，跳过投注", f"账户:{phone}")
                 return
             
@@ -2088,27 +1880,8 @@ class GameScheduler:
                 bet_types = self._get_bet_types(prediction, acc.betting_scheme)
             
             currency_symbol = acc.get_currency_symbol()
-            
-            # 特殊组合翻倍：大双和小单投注金额翻1.2倍
-            SPECIAL_MULTIPLIER = 1.2
-            SPECIAL_COMBOS = ["大双", "小单"]
-            
-            bet_items = []
-            total = 0
-            for t in bet_types:
-                if t in SPECIAL_COMBOS:
-                    # 特殊组合翻倍
-                    special_amount = bet_amount * SPECIAL_MULTIPLIER
-                    if acc.currency != "KKCOIN":
-                        special_amount = round(special_amount, 2)
-                    else:
-                        special_amount = int(special_amount)
-                    bet_items.append(f"{t} {special_amount}")
-                    total += special_amount
-                    logger.log_betting(0, f"特殊组合翻倍", f"账户:{phone} 组合:{t} 原金额:{bet_amount} 翻倍后:{special_amount}")
-                else:
-                    bet_items.append(f"{t} {bet_amount}")
-                    total += bet_amount
+            bet_items = [f"{t} {bet_amount}" for t in bet_types]
+            total = bet_amount * len(bet_types)
             
             if current_balance < total: 
                 logger.log_betting(0, f"余额不足({acc.currency})", f"账户:{phone} 余额:{current_balance}{currency_symbol} 需要:{total}{currency_symbol}")
@@ -2415,7 +2188,7 @@ class GlobalScheduler:
                 if acc.last_bet_period and acc.last_bet_period != qihao:
                     self._create_task(self.game_scheduler.check_bet_result(phone, acc.last_bet_period, latest))
             
-            history = await self.api.get_history(200)
+            history = await self.api.get_history(50)
             if len(history) < 3: 
                 logger.log_game("历史数据不足，跳过预测")
                 return
@@ -2425,7 +2198,7 @@ class GlobalScheduler:
                     logger.log_game(f"使用缓存的预测结果: 期号 {qihao}")
                     prediction = self._last_prediction_result
                 else:
-                    logger.log_game(f"开始为新期号 {qihao} 生成预测（双杀组+双Y融合算法）")
+                    logger.log_game(f"开始为新期号 {qihao} 生成预测（东京4算法评分选优）")
                     prediction = await self.model.predict(history, latest)
                     self._last_prediction_result = prediction
                     self._last_prediction_qihao = qihao
@@ -2474,7 +2247,7 @@ class PC28Bot:
 
         self.application = Application.builder().token(Config.BOT_TOKEN).build()
         self._register_handlers()
-        logger.log_system("PC28 Bot（双杀组+双Y融合算法版 - 固定15秒投注延迟 + 多币种支持KKCOIN/USDT/CNY）初始化完成")
+        logger.log_system("PC28 Bot（东京4算法评分选优版 - 固定15秒投注延迟 + 多币种支持KKCOIN/USDT/CNY）初始化完成")
 
     def _register_handlers(self):
         self.application.add_handler(CommandHandler("start", self.cmd_start))
@@ -2536,8 +2309,7 @@ class PC28Bot:
         ]
         await update.message.reply_text(
             "🎰 *PC28 智能预测投注系统*\n\n"
-            "✨ 欢迎使用！基于双杀组+双Y融合算法\n"
-            "🤖 硅基流动AI辅助验证\n"
+            "✨ 欢迎使用！基于东京4算法评分选优\n"
             "⏱️ 固定投注延迟：15秒\n"
             "💱 多币种支持：KKCOIN / USDT / CNY\n\n"
             "请选择操作：",
@@ -2574,8 +2346,7 @@ class PC28Bot:
         ]
         await message.reply_text(
             "🎰 *PC28 智能预测投注系统*\n\n"
-            "✨ 欢迎使用！基于双杀组+双Y融合算法\n"
-            "🤖 硅基流动AI辅助验证\n"
+            "✨ 欢迎使用！基于东京4算法评分选优\n"
             "⏱️ 固定投注延迟：15秒\n"
             "💱 多币种支持：KKCOIN / USDT / CNY\n\n"
             "请选择操作：",
@@ -3143,7 +2914,7 @@ class PC28Bot:
             [InlineKeyboardButton("📖 使用手册", url=Config.MANUAL_LINK)],
             [InlineKeyboardButton("🔄 刷新菜单", callback_data="menu:main")]
         ]
-        text = "🎮 *PC28 智能投注系统*\n\n基于双杀组+双Y融合算法 | AI辅助验证 | 固定15秒投注延迟 | 多币种支持\n\n请选择操作："
+        text = "🎮 *PC28 智能投注系统*\n\n基于东京4算法评分选优 | 固定15秒投注延迟 | 多币种支持\n\n请选择操作："
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     async def _show_accounts_menu(self, query, user):
@@ -3185,7 +2956,7 @@ class PC28Bot:
             [InlineKeyboardButton("🔮 运行预测", callback_data="run_analysis")],
             [InlineKeyboardButton("🔙 返回主菜单", callback_data="menu:main")]
         ]
-        await query.edit_message_text("🎯 *预测分析菜单*\n\n使用双杀组+双Y融合算法 | AI辅助验证", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await query.edit_message_text("🎯 *预测分析菜单*\n\n使用东京4算法评分选优机制", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     async def _show_amount_menu_callback(self, query, user, phone, context):
         context.user_data.pop('last_amount_msg', None)
@@ -3586,11 +3357,12 @@ class PC28Bot:
 每个账户可独立选择投注币种，余额和金额显示会自动适配。
 
 *预测算法说明*
-本系统使用双杀组+双Y融合算法进行预测：
-• 双杀组算法：Y值位差和 + 和值运算对立算法，双算法一致确定杀组
-• 双Y融合：3Y顺序取尾数 + 双权重打分（尾数和40% + 走势频次60%）
-• 5Y+3Y特码池推导
-• 硅基流动AI辅助验证
+本系统使用东京4算法评分选优机制进行预测：
+• 天子算法：基于号码公式计算（(A+C)*B + 前10期B球）
+• 走势算法：连续相同形态杀组 + 天子算法回退
+• 3y算法：直接杀上一期形态
+• 5Y算法：基于和值对5取余推导
+• 评分选优：回测30期选命中率最高的算法
 
 如有问题，请联系管理员。
         """
@@ -3598,7 +3370,7 @@ class PC28Bot:
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     async def _process_run_analysis(self, query):
-        await query.edit_message_text("🔍 正在生成预测（使用双杀组+双Y融合算法）...")
+        await query.edit_message_text("🔍 正在生成预测（使用东京4算法评分选优）...")
         history = await self.api.get_history(50)
         if len(history) < 3:
             await query.edit_message_text("❌ 历史数据不足，至少需要3期数据")
@@ -3608,6 +3380,8 @@ class PC28Bot:
         pred = await self.model.predict(history, latest)
         
         acc_stats = self.model.get_accuracy_stats()
+        best_algo = pred.get('best_algorithm', 'N/A')
+        best_score = pred.get('best_score', 'N/A')
         text = f"""
 🎯 *PC28预测结果*
 
@@ -3616,6 +3390,7 @@ class PC28Bot:
 • 最新结果: {latest.get('total', 'N/A')} ({latest.get('category', 'N/A')})
 
 🏆 *算法预测：*
+• 当前最优算法: {best_algo} (命中率: {best_score})
 • 主推: {pred['main']}
 • 候选: {pred['candidate']}
 • 杀组: {pred['kill']}
@@ -3624,10 +3399,9 @@ class PC28Bot:
 📈 *近期准确率：{acc_stats['overall']['recent']*100:.1f}%*
 
 🧠 *算法说明：*
-• 双杀组算法（Y值位差和 + 和值运算对立）
-• 双Y融合（3Y尾数顺序 + 双权重打分）
-• 5Y+3Y特码池推导
-• 硅基流动AI辅助验证
+• 天子算法 / 走势算法 / 3y算法 / 5Y算法
+• 回测30期评分选优机制
+• 自动切换最优算法
         """
         kb = [[InlineKeyboardButton("🔄 刷新预测", callback_data="run_analysis")],
               [InlineKeyboardButton("🔙 返回主菜单", callback_data="menu:main")]]
@@ -3817,7 +3591,7 @@ def main():
     print("""
 ========================================
 PC28自动投注系统
-基于双杀组+双Y融合算法 | AI辅助验证 | 固定15秒投注延迟 | 多币种支持
+基于东京4算法评分选优 | 固定15秒投注延迟 | 多币种支持
 支持币种: KKCOIN / USDT / CNY
 ========================================
 启动中...
